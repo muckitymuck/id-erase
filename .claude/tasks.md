@@ -1,0 +1,462 @@
+# id-erase: Task Tracker
+
+| Field | Value |
+|-------|-------|
+| Version | 0.1.0 |
+| Date | 2026-02-22 |
+| Status | Not Started |
+
+---
+
+## Phase 0: Foundation (Week 1-2)
+
+### 0.1 Fork seo-executor → erasure-executor
+
+- [ ] Copy `seo-fetch/packages/seo-executor/` to `id-erase/packages/erasure-executor/`
+- [ ] Rename all `seo_executor` references to `erasure_executor` (module names, imports, pyproject.toml)
+- [ ] Update `pyproject.toml`:
+  - Name: `erasure-executor`
+  - Add dependencies: `playwright>=1.50.0`, `cryptography>=44.0.0`
+  - Keep: `fastapi`, `uvicorn`, `pydantic`, `sqlalchemy`, `psycopg[binary]`, `alembic`, `prometheus-client`, `httpx`, `beautifulsoup4`, `lxml`, `jsonschema`, `PyYAML`
+  - Remove: `GitPython` (not needed for MVP)
+- [ ] Remove SEO-specific code from `connectors/scraper.py` (keep BeautifulSoup util, remove SEO field extraction)
+- [ ] Remove `connectors/git.py` and `connectors/shell.py` (not needed for MVP)
+- [ ] Remove `git.apply_patch` and `shell.exec` from task registry
+- [ ] Verify all existing tests pass under new module paths
+- [ ] Create `Dockerfile` (Python 3.11, non-root user, Playwright browser deps)
+
+### 0.2 Database schema
+
+- [ ] Create Alembic migration: `pii_profiles` table
+  - Fields: profile_id (UUID PK), label, encrypted_data (BYTEA), encryption_iv (BYTEA), encryption_tag (BYTEA), data_hash, created_at, updated_at
+- [ ] Create Alembic migration: `broker_listings` table
+  - Fields: listing_id (UUID PK), broker_id, profile_id (FK), status, listing_url, listing_snapshot (JSONB), matched_fields (JSONB), confidence, discovered_at, removal_sent_at, verified_at, last_checked_at, recheck_after, notes
+  - Indexes: broker_id, status, recheck_after (partial WHERE status != 'removed')
+  - Constraint: confidence CHECK (0.0-1.0)
+- [ ] Create Alembic migration: `removal_actions` table
+  - Fields: action_id (UUID PK), listing_id (FK), run_id (FK), action_type, request_summary, response_status, confirmation_id, error_message, created_at
+  - Index: listing_id
+- [ ] Create Alembic migration: `human_action_queue` table
+  - Fields: queue_id (UUID PK), listing_id (FK), broker_id, action_needed, instructions, priority, status, created_at, completed_at, completed_notes
+  - Index: status (partial WHERE status = 'pending')
+- [ ] Create Alembic migration: `scan_schedule` table
+  - Fields: schedule_id (UUID PK), broker_id, profile_id (FK), scan_type, next_run_at, last_run_id (FK), last_run_at, interval_days, enabled, created_at
+  - Index: next_run_at (partial WHERE enabled = true)
+- [ ] Add SQLAlchemy ORM models in `db/models.py` for all 5 new tables
+- [ ] Verify migrations run cleanly: `alembic upgrade head`
+
+### 0.3 PII vault
+
+- [ ] Create `engine/pii_vault.py` — PIIVault class
+  - `__init__(encryption_key: bytes)` — validate 32-byte key
+  - `encrypt(profile_data: dict) -> tuple[bytes, bytes, bytes]` — AES-256-GCM
+  - `decrypt(ciphertext, iv, tag) -> dict`
+  - `data_hash(profile_data: dict) -> str` — SHA-256
+- [ ] Create `schemas/pii.py` — Pydantic models
+  - `PIIProfile`: full_name, aliases, date_of_birth, addresses, phone_numbers, email_addresses, relatives
+  - `PIIAddress`: street, city, state, zip, current
+  - `PIIPhone`: number, type
+  - `CreateProfileRequest`, `ProfileMetadataResponse`
+- [ ] Add API endpoints in `api.py`:
+  - `POST /v1/profiles` — validate, encrypt, store
+  - `GET /v1/profiles/{profile_id}` — return metadata only (label, data_hash, timestamps)
+  - `DELETE /v1/profiles/{profile_id}` — delete profile + all associated broker_listings, removal_actions, scan_schedule
+- [ ] Add `PII_ENCRYPTION_KEY` to config loading (`config.py`)
+- [ ] Write tests:
+  - Encrypt → decrypt round-trip produces identical data
+  - Wrong key fails decryption
+  - Key length validation
+  - data_hash is deterministic
+  - API create → get → delete lifecycle
+  - DELETE cascades to related tables
+
+### 0.4 Browser connector
+
+- [ ] Create `connectors/browser.py` — BrowserConnector class
+  - `navigate(url, wait_for) -> Page`
+  - `extract(page, selectors) -> dict`
+  - `fill_form(page, fields) -> None`
+  - `click_and_wait(page, selector, wait_for) -> None`
+  - `screenshot(page, path) -> str`
+  - `close() -> None`
+- [ ] Stealth basics:
+  - Randomized User-Agent from list of 5+ real browsers
+  - Randomized viewport from list of 4+ common resolutions
+  - Human-like delays: `random.uniform(1.0, 3.0)` between actions
+  - Locale: "en-US"
+- [ ] Write tests:
+  - Navigate to local HTML fixture file
+  - Extract text and attributes from known selectors
+  - Fill and submit a local form
+  - Screenshot produces a file
+- [ ] Handle Playwright not installed gracefully (clear error message)
+
+### 0.5 Email connector
+
+- [ ] Create `connectors/email.py` — EmailConnector class
+  - `send(to, subject, body, from_addr) -> dict`
+  - `check_inbox(from_filter, subject_filter, since_minutes, wait_minutes, poll_interval_seconds) -> list[EmailMessage]`
+  - `_search_inbox(from_filter, subject_filter) -> list[EmailMessage]`
+  - `_extract_links(text) -> list[str]`
+- [ ] Create EmailConfig dataclass matching executor config schema
+- [ ] Add email config section to `config.py`
+- [ ] Write tests using MailHog:
+  - Send email → appears in MailHog
+  - Send email → check_inbox finds it with correct from/subject
+  - Extract links from email body
+  - Timeout when no matching email found
+
+### 0.6 Docker Compose
+
+- [ ] Create `docker-compose.yml`:
+  - `erasure-executor` service (build from Dockerfile, port 8080)
+  - `postgres` service (postgres:16-alpine, port 5432)
+  - `mailhog` service (ports 8025/1025)
+  - `prometheus` service (port 9090)
+  - Volumes: pg_data, artifacts
+  - Environment variables for all secrets
+- [ ] Create `Makefile`:
+  - `build` — docker compose build
+  - `up` — docker compose up -d
+  - `down` — docker compose down
+  - `migrate` — run alembic upgrade head in executor container
+  - `test` — run pytest in executor container
+  - `logs` — docker compose logs -f erasure-executor
+- [ ] Verify `make build && make up && make migrate` works cleanly
+- [ ] Verify healthz endpoint responds
+
+### 0.7 Config and workspace template
+
+- [ ] Create `config/executor.config.yaml` (all sections from design.md section 9.1)
+- [ ] Create `config/openclaw.openclaw.json5` (from design.md section 9.2)
+- [ ] Create workspace template files:
+  - `workspace-template/IDENTITY.md` — agent identity
+  - `workspace-template/SOUL.md` — operating principles
+  - `workspace-template/AGENTS.md` — execution protocol and hard constraints
+  - `workspace-template/TOOLS.md` — tool conventions
+- [ ] Create `schemas/executor-config.schema.json`
+- [ ] Create `schemas/erasure-plan.schema.json`
+- [ ] Create `schemas/pii-profile.schema.json`
+
+---
+
+## Phase 1: First Broker (Week 3-4)
+
+### 1.1 Broker catalog
+
+- [ ] Create `broker-catalog/catalog.yaml` with 10 broker entries (id, name, category, removal_method, difficulty, plan_file, recheck_days, notes)
+- [ ] Implement catalog loader in executor config: YAML → dict, validated at startup
+- [ ] Write catalog validation test
+
+### 1.2 match.identity task type
+
+- [ ] Create `matching/identity.py`:
+  - `normalize_name(name) -> str` — lowercase, strip suffixes (Jr/Sr/III), handle initials
+  - `names_match(a, b) -> bool` — exact or fuzzy (Levenshtein < 2)
+  - `location_matches(listing_loc, profile_addresses) -> bool` — city+state comparison
+  - `age_matches(listing_age, dob, tolerance) -> bool` — calculated age within tolerance
+  - `relatives_match(listing_relatives, profile_relatives) -> bool` — any overlap
+  - `phone_matches(listing_phone, profile_phones) -> bool` — normalized comparison
+  - `heuristic_match(listing, profile) -> MatchResult` — weighted scoring
+  - `llm_verify_match(listing, profile, heuristic_result, llm_connector) -> MatchResult` — borderline verification
+- [ ] Register `match.identity` in `tasks/registry.py`:
+  - Loads PII profile from vault (decrypts in memory)
+  - Iterates listings from `listings_ref`
+  - Runs heuristic_match for each
+  - Runs llm_verify for borderline cases (0.4-0.8 confidence)
+  - Returns matched listings above threshold
+- [ ] Write tests:
+  - Exact name + location + age → confidence ~1.0
+  - Name match, wrong city → lower confidence
+  - Common name, no other fields → below threshold
+  - Alias match (middle initial variation) → high confidence
+  - LLM verification path (mock LLM)
+
+### 1.3 scrape.rendered task type
+
+- [ ] Register `scrape.rendered` in `tasks/registry.py`:
+  - Resolve url_template with params
+  - Call BrowserConnector.navigate(url, wait_for)
+  - Call BrowserConnector.extract(page, selectors) if extract defined
+  - Execute actions list if defined (fill, click sequences)
+  - Save screenshot as artifact if screenshot=true
+  - Return extracted data
+- [ ] Handle Playwright errors:
+  - Timeout → TaskExecutionError(transient=True)
+  - Selector not found → TaskExecutionError(transient=False) with clear message
+  - Navigation failure → TaskExecutionError(transient=True)
+- [ ] Write tests with local HTML fixture
+
+### 1.4 form.submit task type
+
+- [ ] Create `connectors/form.py` — FormConnector class (detect_form, fill_and_submit)
+- [ ] Register `form.submit` in `tasks/registry.py`:
+  - Navigate to URL
+  - Detect form using hints or heuristics
+  - Resolve field values from state/params
+  - Fill and submit via FormConnector
+  - Screenshot before and after submit
+  - Return submit result
+- [ ] Write tests with local HTML form fixture
+
+### 1.5 Email task types
+
+- [ ] Register `email.send` in `tasks/registry.py`:
+  - Resolve to/subject/body from input with template resolution
+  - Call EmailConnector.send()
+  - Return send result
+- [ ] Register `email.check` in `tasks/registry.py`:
+  - Call EmailConnector.check_inbox() with filters and wait time
+  - Extract links if extract_links=true
+  - Return matched emails with links
+- [ ] Register `email.click_verify` in `tasks/registry.py`:
+  - Resolve link from link_ref
+  - Navigate to link via BrowserConnector
+  - Wait for confirmation selector if provided
+  - Screenshot
+  - Return result
+- [ ] Write tests using MailHog:
+  - Send email → check finds it → links extracted
+  - Verification link opened in browser
+
+### 1.6 broker.update_status task type
+
+- [ ] Register `broker.update_status` in `tasks/registry.py`:
+  - Resolve broker_id, status, listing data from input
+  - Upsert broker_listings row (insert if new, update if existing)
+  - Insert removal_actions row if removal was attempted
+  - Set recheck_after based on recheck_days from catalog
+  - Return status update summary
+- [ ] Write tests:
+  - New listing → inserted with status=found
+  - Status update → found → removal_submitted → pending_verification
+  - recheck_after set correctly
+
+### 1.7 wait.delay task type
+
+- [ ] Register `wait.delay` in `tasks/registry.py`:
+  - Read hours/minutes from input
+  - For MVP: calculate resume_at, store in run_task output
+  - Runner checks: if task type is wait.delay and current time < resume_at, skip and re-poll
+  - Return delay info when time has passed
+- [ ] Write tests:
+  - Delay with 0 hours → immediate pass
+  - Delay with future time → skip (runner level test)
+
+### 1.8 Spokeo plan
+
+- [ ] Research Spokeo opt-out flow:
+  - Search URL format and selectors
+  - Opt-out page URL and form fields
+  - Email verification process
+  - Document all selectors in plan comments
+- [ ] Write `workspace-template/plans/brokers/spokeo.yaml`:
+  - Task: search_listing (scrape.rendered)
+  - Task: match_results (match.identity)
+  - Task: submit_optout (scrape.rendered or form.submit, requires_approval)
+  - Task: check_verification_email (email.check)
+  - Task: click_verify_link (email.click_verify)
+  - Task: update_status (broker.update_status)
+- [ ] End-to-end test against real Spokeo (or mock):
+  - Discovery finds listings
+  - Matching filters to correct person
+  - Approval gate blocks
+  - After approval, opt-out submitted
+  - Email verification completed
+  - Status updated to pending_verification
+- [ ] Document any anti-bot issues and workarounds
+
+---
+
+## Phase 2: Broker Expansion (Week 5-8)
+
+### 2.1 Broker plans
+
+For each broker, the work is:
+1. Research opt-out flow (selectors, forms, verification)
+2. Write YAML plan
+3. Test discovery against live site
+4. Test removal flow
+5. Document anti-bot behavior
+
+- [ ] BeenVerified plan (`brokers/beenverified.yaml`)
+- [ ] Intelius plan (`brokers/intelius.yaml`)
+- [ ] FamilyTreeNow plan (`brokers/familytreenow.yaml`)
+- [ ] TruePeopleSearch plan (`brokers/truepeoplesearch.yaml`)
+- [ ] FastPeopleSearch plan (`brokers/fastpeoplesearch.yaml`)
+- [ ] PeopleFinder plan (`brokers/peoplefinder.yaml`)
+- [ ] WhitePages plan (`brokers/whitepages.yaml`) — phone verify step → human queue
+- [ ] Radaris plan (`brokers/radaris.yaml`) — account creation step
+- [ ] Acxiom plan (`brokers/acxiom.yaml`)
+
+### 2.2 Human action queue
+
+- [ ] Add `queue.human_action` task type to registry:
+  - Insert into human_action_queue table
+  - Include: action_needed, instructions, priority, broker_id
+  - Mark task as succeeded (run continues, human action is async)
+- [ ] Add API endpoints:
+  - `GET /v1/queue` — list pending items, ordered by priority desc
+  - `GET /v1/queue/{queue_id}` — single item detail
+  - `POST /v1/queue/{queue_id}/complete` — mark done with optional notes
+- [ ] Write tests
+
+### 2.3 Scheduler
+
+- [ ] Implement `engine/scheduler.py` — ErasureScheduler class:
+  - `get_due_jobs() -> list[ScanJob]`
+  - `mark_started(schedule_id, run_id)`
+  - `initialize_for_profile(profile_id)`
+- [ ] Add background thread in `main.py`:
+  - Polls every `scheduler.poll_interval_seconds` (default 300s)
+  - For each due job: create Run via internal API, mark_started
+  - Rate limit: max 1 concurrent run per broker
+- [ ] Wire into profile creation: `POST /v1/profiles` calls `initialize_for_profile`
+- [ ] Write tests:
+  - Due jobs returned correctly based on next_run_at
+  - mark_started advances next_run_at by interval_days
+  - initialize_for_profile creates schedules for all catalog brokers
+
+### 2.4 Status API
+
+- [ ] `GET /v1/brokers` — returns list of brokers with:
+  - broker_id, name, category, difficulty
+  - listing_counts: {found, removal_submitted, pending_verification, removed, reappeared, manual_required}
+  - last_scan_at, next_scan_at
+- [ ] `GET /v1/brokers/{broker_id}/listings` — returns broker_listings rows for broker
+- [ ] `GET /v1/schedule` — returns scan_schedule rows with next_run_at
+- [ ] `POST /v1/schedule/{schedule_id}/trigger` — set next_run_at to now()
+- [ ] Write tests for all endpoints
+
+---
+
+## Phase 3: Hardening (Week 9-10)
+
+### 3.1 Anti-bot stealth
+
+- [ ] Add `playwright-stealth` to dependencies (or equivalent stealth patches)
+- [ ] Configurable request delays in executor config: `browser.min_delay_ms`, `browser.max_delay_ms`
+- [ ] Proxy support in BrowserConnector: `browser.proxy_url` config option
+- [ ] Rate limiter: max N requests per broker per hour (configurable in catalog)
+- [ ] robots.txt check before scraping (configurable, on by default)
+
+### 3.2 CAPTCHA handling
+
+- [ ] Add `captcha.manual_queue` task type:
+  - Screenshot the CAPTCHA
+  - Insert into human_action_queue with screenshot artifact reference
+  - Block run until human completes queue item
+- [ ] Simple web page for CAPTCHA solving (serves screenshot, accepts text input)
+- [ ] Stub for future third-party solver integration (2Captcha API interface)
+
+### 3.3 PII security
+
+- [ ] Wire `utils/redact.py` RedactingFilter into all loggers in `logging.py`
+- [ ] At executor startup, load PII terms from profile and add to redaction filter
+- [ ] Test: run a full broker plan, grep all log output for any PII term → 0 matches
+- [ ] SSRF validation in `connectors/http.py`:
+  - Block private CIDRs: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16
+  - Block localhost, [::1]
+  - Validate URL before every request
+- [ ] Update `auth.py`: use `hmac.compare_digest()` for bearer token comparison
+- [ ] Review all artifact storage: no raw PII in artifact files (only encrypted in pii_profiles)
+
+### 3.4 Artifact lifecycle
+
+- [ ] Background job (runs daily):
+  - Delete run_artifacts where kind='html' and age > `pii.artifact_retention.html_days`
+  - Delete run_artifacts where kind='screenshot' and age > `pii.artifact_retention.screenshot_days`
+  - Delete corresponding files from disk
+  - Keep kind='confirmation' and kind='receipt' indefinitely
+- [ ] Configurable retention in executor config
+- [ ] Write tests
+
+### 3.5 Error resilience
+
+- [ ] Graceful selector-not-found handling: clear error message with broker_id and selector
+- [ ] Plan health check endpoint: `POST /v1/plans/{plan_id}/check`
+  - Runs discovery step only (no removal)
+  - Reports which selectors matched vs. failed
+  - Returns health status: healthy | degraded | broken
+- [ ] Dead letter tracking: after 3 consecutive plan failures for a broker, disable schedule and alert
+
+---
+
+## Phase 4: CLI & Observability (Week 11-12)
+
+### 4.1 CLI tool
+
+- [ ] Create `packages/erasure-cli/` with Click-based CLI
+- [ ] Commands:
+  - `id-erase profile create` — interactive prompts for PII fields → POST /v1/profiles
+  - `id-erase profile show` — GET /v1/profiles/{id} → display metadata table
+  - `id-erase profile delete` — confirm + DELETE /v1/profiles/{id}
+  - `id-erase scan` — trigger all brokers → POST /v1/schedule/{id}/trigger for each
+  - `id-erase scan <broker>` — trigger single broker
+  - `id-erase status` — GET /v1/brokers → formatted table
+  - `id-erase status <broker>` — GET /v1/brokers/{id}/listings → formatted table
+  - `id-erase queue` — GET /v1/queue → formatted list
+  - `id-erase queue complete <id>` — POST /v1/queue/{id}/complete
+  - `id-erase schedule` — GET /v1/schedule → formatted table
+- [ ] Config: `~/.id-erase/config.yaml` with executor_url and auth_token
+- [ ] Write tests for CLI commands (mock API responses)
+
+### 4.2 Prometheus metrics
+
+- [ ] Add to `metrics.py`:
+  - `erasure_listings_total` (Gauge, labels: broker, status)
+  - `erasure_removals_total` (Counter, labels: broker, result)
+  - `erasure_scans_total` (Counter, labels: broker, result)
+  - `erasure_human_queue_pending` (Gauge)
+  - `erasure_match_confidence` (Histogram, labels: broker)
+- [ ] Wire metrics into:
+  - Task completion (registry.py)
+  - broker.update_status
+  - Scheduler run start/complete
+  - match.identity confidence scores
+- [ ] Write tests: verify metric values after operations
+
+### 4.3 Grafana dashboard
+
+- [ ] Create `config/grafana/dashboards/id-erase.json`:
+  - Row: Broker coverage (table: broker × status counts)
+  - Row: Removal success rate (bar chart over time)
+  - Row: Scan frequency (graph: scans/day per broker)
+  - Row: Human queue depth (gauge)
+  - Row: Match confidence distribution (histogram)
+- [ ] Provision via Docker Compose grafana service
+
+### 4.4 Alerting
+
+- [ ] Create `config/prometheus/alerts.yml`:
+  - `ErasurePlanFailureRate` — rate of plan failures > 50% for 1h per broker
+  - `ErasureHumanQueueBacklog` — pending queue items > 10
+  - `ErasureSchedulerStalled` — no scans completed in 48h
+  - `ErasurePIIExposure` — PII pattern detected in logs (if log monitoring available)
+
+---
+
+## Phase 5: Legal & Discovery (Future)
+
+- [ ] CCPA deletion request template
+- [ ] GDPR Article 17 request template
+- [ ] `legal.generate_request` task type (LLM-powered, template-based)
+- [ ] `discover.search_engine` task type (Google/Bing search for user's name)
+- [ ] LLM classifier: is this search result a data broker listing?
+- [ ] Auto-add discovered brokers to catalog (pending plan creation)
+- [ ] Google content removal request integration
+
+---
+
+## Phase 6: Multi-User & Web UI (Future)
+
+- [ ] Row-level security on all tables (profile_id column)
+- [ ] JWT auth with user claims (replace bearer token)
+- [ ] Per-user encryption keys
+- [ ] Web dashboard (Supabase + Vercel or equivalent)
+  - Profile management
+  - Broker status visualization
+  - Human action queue
+  - Scan history
+- [ ] Hosted deployment manifests (Kubernetes)
+- [ ] Onboarding flow for non-technical users
