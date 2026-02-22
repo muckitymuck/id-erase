@@ -283,9 +283,78 @@ def _execute_llm_json(task_input: dict[str, Any], ctx: TaskExecutionContext, tim
 # ---------------------------------------------------------------------------
 
 def _execute_form_submit(task_input: dict[str, Any], ctx: TaskExecutionContext, timeout_ms: int) -> dict[str, Any]:
-    # Phase 1 implementation — for now, log and return stub
-    logger.info("form.submit stub executed")
-    return {"mode": "stub", "task_type": "form.submit", "input_keys": list(task_input.keys())}
+    from erasure_executor.connectors.browser import BrowserConnector, run_browser_task
+    from erasure_executor.connectors.form import FormConnector
+
+    target_id = task_input.get("target_id")
+    target = ctx.targets.get(target_id, {}) if isinstance(target_id, str) else {}
+    base_url = task_input.get("base_url") or target.get("base_url", "")
+
+    url_template = task_input.get("url_template", "/")
+    url = base_url.rstrip("/") + url_template if not url_template.startswith("http") else url_template
+
+    wait_for = task_input.get("wait_for")
+    form_hints = task_input.get("form_hints")
+    field_values = task_input.get("fields", {})
+    take_screenshot = task_input.get("screenshot", True)
+
+    # Resolve field values from state/params
+    resolved_fields = {}
+    for k, v in field_values.items():
+        if isinstance(v, str) and v.startswith("{{") and v.endswith("}}"):
+            ref = v[2:-2].strip()
+            resolved = _value_from_ref(ref, ctx)
+            resolved_fields[k] = str(resolved) if resolved is not None else ""
+        else:
+            resolved_fields[k] = str(v)
+
+    browser = BrowserConnector(
+        headless=ctx.config.browser.headless,
+        stealth=ctx.config.browser.stealth,
+    )
+    form_connector = FormConnector()
+
+    async def _run():
+        try:
+            page, status = await browser.navigate(url, wait_for=wait_for, timeout_ms=timeout_ms)
+
+            form = await form_connector.detect_form(page, hints=form_hints)
+            if form is None:
+                raise TaskExecutionError("form.submit: no form detected on page", transient=False)
+
+            screenshot_base = None
+            if take_screenshot:
+                import uuid as _uuid
+                from pathlib import Path
+                sc_dir = Path(ctx.config.artifacts_root) / "screenshots"
+                sc_dir.mkdir(parents=True, exist_ok=True)
+                screenshot_base = str(sc_dir / str(_uuid.uuid4()))
+
+            # Map field values by selector — form_hints can provide name→selector mapping
+            values_by_selector = {}
+            selector_map = (form_hints or {}).get("field_map", {})
+            for field_name, value in resolved_fields.items():
+                selector = selector_map.get(field_name, f"[name='{field_name}']")
+                values_by_selector[selector] = value
+
+            result = await form_connector.fill_and_submit(
+                page, form, values_by_selector, screenshot_path=screenshot_base,
+            )
+
+            return {
+                "url": url,
+                "form_action": form.action_url,
+                "form_method": form.method,
+                "fields_submitted": list(resolved_fields.keys()),
+                "success": result.success,
+                "error": result.error,
+                "screenshot_path": result.screenshot_path,
+                "response_excerpt": (result.response_text or "")[:5000],
+            }
+        finally:
+            await browser.close()
+
+    return run_browser_task(_run())
 
 
 def _execute_email_send(task_input: dict[str, Any], ctx: TaskExecutionContext) -> dict[str, Any]:
@@ -355,27 +424,287 @@ def _execute_email_click_verify(task_input: dict[str, Any], ctx: TaskExecutionCo
 
 
 def _execute_match_identity(task_input: dict[str, Any], ctx: TaskExecutionContext, timeout_ms: int) -> dict[str, Any]:
-    # Phase 1 implementation — stub for now
-    logger.info("match.identity stub executed")
-    return {"mode": "stub", "task_type": "match.identity", "matched": [], "count": 0}
+    from erasure_executor.engine.pii_vault import PIIVault
+    from erasure_executor.matching.identity import MatchResult, heuristic_match
+
+    # Load and decrypt profile
+    profile_id = task_input.get("profile_id")
+    if not profile_id:
+        raise ValueError("match.identity requires profile_id")
+
+    profile_ref = task_input.get("profile_ref")
+    profile_data = None
+    if profile_ref:
+        profile_data = _value_from_ref(profile_ref, ctx)
+
+    if not isinstance(profile_data, dict):
+        # Load from vault via state (the runner should have decrypted it)
+        profile_data = _value_from_ref("profile_data", ctx)
+    if not isinstance(profile_data, dict):
+        raise ValueError("match.identity: could not resolve profile data from profile_ref or state.profile_data")
+
+    # Get listings to match against
+    listings_ref = task_input.get("listings_ref")
+    listings = []
+    if listings_ref:
+        raw = _value_from_ref(listings_ref, ctx)
+        if isinstance(raw, list):
+            listings = raw
+        elif isinstance(raw, dict) and "extracted" in raw:
+            # Handle scrape.rendered output format
+            listings = _build_listings_from_extracted(raw["extracted"])
+
+    if not listings:
+        return {"matched": [], "all_results": [], "count": 0}
+
+    threshold = float(task_input.get("threshold", ctx.config.policy.confidence_threshold))
+    llm_threshold_low = float(task_input.get("llm_threshold_low", 0.4))
+    llm_threshold_high = float(task_input.get("llm_threshold_high", 0.8))
+
+    results: list[dict[str, Any]] = []
+    matched: list[dict[str, Any]] = []
+
+    for listing in listings:
+        if not isinstance(listing, dict):
+            continue
+        match_result = heuristic_match(listing, profile_data)
+
+        result_dict = {
+            "listing": listing,
+            "confidence": match_result.confidence,
+            "matched_fields": match_result.matched_fields,
+            "above_threshold": match_result.confidence >= threshold,
+        }
+
+        # LLM verification for borderline cases
+        if llm_threshold_low <= match_result.confidence <= llm_threshold_high:
+            if ctx.config.llm.provider != "mock":
+                try:
+                    llm_result = _llm_verify_match(match_result, profile_data, ctx, timeout_ms)
+                    result_dict["llm_verified"] = llm_result.get("is_match", False)
+                    result_dict["llm_confidence"] = llm_result.get("confidence", match_result.confidence)
+                    result_dict["confidence"] = llm_result.get("confidence", match_result.confidence)
+                    result_dict["above_threshold"] = result_dict["confidence"] >= threshold
+                except Exception:
+                    logger.exception("match.identity llm_verify failed, using heuristic score")
+
+        results.append(result_dict)
+        if result_dict["above_threshold"]:
+            matched.append(result_dict)
+
+    return {"matched": matched, "all_results": results, "count": len(matched)}
+
+
+def _build_listings_from_extracted(extracted: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert selector-extracted data into listing dicts.
+
+    Input format (from scrape.rendered extract):
+        {"names": ["Jane Doe", "John Doe"], "locations": ["Chicago, IL", ...], ...}
+    Output:
+        [{"name": "Jane Doe", "location": "Chicago, IL"}, ...]
+    """
+    # Map common extracted field names to listing field names
+    field_map = {
+        "names": "name", "name": "name",
+        "locations": "location", "location": "location",
+        "ages": "age", "age": "age",
+        "phones": "phone", "phone": "phone",
+        "links": "profile_url", "urls": "profile_url",
+    }
+
+    mapped: dict[str, list] = {}
+    max_len = 0
+    for key, values in extracted.items():
+        if not isinstance(values, list):
+            continue
+        field_name = field_map.get(key, key)
+        mapped[field_name] = values
+        max_len = max(max_len, len(values))
+
+    if max_len == 0:
+        return []
+
+    listings = []
+    for i in range(max_len):
+        listing = {}
+        for field_name, values in mapped.items():
+            if i < len(values):
+                listing[field_name] = values[i]
+        listings.append(listing)
+    return listings
+
+
+def _llm_verify_match(
+    match_result: MatchResult,
+    profile: dict[str, Any],
+    ctx: TaskExecutionContext,
+    timeout_ms: int,
+) -> dict[str, Any]:
+    """Use LLM to verify a borderline match."""
+    prompt = (
+        "You are verifying whether a data broker listing matches a specific person. "
+        "Compare the listing data against the profile and determine if they are the same person. "
+        "Consider name variations, location history, age, and any other available data."
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "is_match": {"type": "boolean"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "reasoning": {"type": "string"},
+        },
+        "required": ["is_match", "confidence", "reasoning"],
+    }
+    # Build source with redacted profile (just enough for matching)
+    safe_profile = {
+        "full_name": profile.get("full_name", ""),
+        "aliases": profile.get("aliases", []),
+        "addresses": [
+            {"city": a.get("city", ""), "state": a.get("state", "")}
+            for a in (profile.get("addresses") or [])
+            if isinstance(a, dict)
+        ],
+        "has_dob": bool(profile.get("date_of_birth")),
+        "relative_count": len(profile.get("relatives", [])),
+    }
+
+    llm_input = {
+        "prompt": prompt,
+        "schema": schema,
+        "json_ref": None,
+    }
+
+    # Inject source data as context
+    source = {
+        "listing": match_result.listing_data,
+        "profile_summary": safe_profile,
+        "heuristic_confidence": match_result.confidence,
+        "matched_fields": match_result.matched_fields,
+    }
+
+    # Store source in state temporarily for the LLM task to pick up
+    ctx.state["_llm_verify_source"] = source
+    llm_input["json_ref"] = "_llm_verify_source"
+
+    return _execute_llm_json(llm_input, ctx, timeout_ms)
 
 
 def _execute_broker_update_status(task_input: dict[str, Any], ctx: TaskExecutionContext) -> dict[str, Any]:
-    # Phase 1 implementation — stub for now
+    from erasure_executor.metrics import LISTINGS_TOTAL, REMOVALS_TOTAL
+
     broker_id = task_input.get("broker_id", "unknown")
-    status = task_input.get("status", "found")
-    logger.info("broker.update_status broker=%s status=%s", broker_id, status)
-    return {"broker_id": broker_id, "status": status, "updated": True}
+    new_status = task_input.get("status", "found")
+    profile_id = task_input.get("profile_id")
+    listing_url = task_input.get("listing_url")
+    confidence = float(task_input.get("confidence", 0.0))
+    notes = task_input.get("notes")
+    recheck_days = int(task_input.get("recheck_days", 30))
+    run_id = task_input.get("run_id")
+
+    # Resolve listing data from refs
+    listing_ref = task_input.get("listing_ref")
+    listing_data = None
+    if listing_ref:
+        listing_data = _value_from_ref(listing_ref, ctx)
+
+    # Resolve matched fields from refs
+    matched_fields_ref = task_input.get("matched_fields_ref")
+    matched_fields = None
+    if matched_fields_ref:
+        matched_fields = _value_from_ref(matched_fields_ref, ctx)
+
+    # Build the result — actual DB upsert happens when DB session is available
+    # For now, structure the data for the runner to persist
+    import uuid as _uuid
+    from datetime import datetime, timedelta
+
+    listing_id = task_input.get("listing_id") or str(_uuid.uuid4())
+    now = datetime.utcnow()
+
+    result = {
+        "listing_id": listing_id,
+        "broker_id": broker_id,
+        "profile_id": profile_id,
+        "status": new_status,
+        "listing_url": listing_url,
+        "confidence": confidence,
+        "matched_fields": matched_fields,
+        "listing_snapshot": listing_data,
+        "notes": notes,
+        "recheck_after": (now + timedelta(days=recheck_days)).isoformat() if new_status != "removed" else None,
+        "updated_at": now.isoformat(),
+    }
+
+    # Set timestamp fields based on status transition
+    if new_status == "found":
+        result["discovered_at"] = now.isoformat()
+    elif new_status == "removal_submitted":
+        result["removal_sent_at"] = now.isoformat()
+    elif new_status in ("removed", "verified_removed"):
+        result["verified_at"] = now.isoformat()
+
+    result["last_checked_at"] = now.isoformat()
+
+    # Record removal action if applicable
+    if new_status in ("removal_submitted", "removal_failed"):
+        action_type = task_input.get("action_type", "web_form")
+        confirmation_id = task_input.get("confirmation_id")
+        error_message = task_input.get("error_message")
+
+        result["removal_action"] = {
+            "action_id": str(_uuid.uuid4()),
+            "listing_id": listing_id,
+            "run_id": run_id,
+            "action_type": action_type,
+            "request_summary": f"Status update to {new_status} for {broker_id}",
+            "response_status": new_status,
+            "confirmation_id": confirmation_id,
+            "error_message": error_message,
+        }
+
+        # Update metrics
+        metric_result = "succeeded" if new_status == "removal_submitted" else "failed"
+        REMOVALS_TOTAL.labels(broker=broker_id, result=metric_result).inc()
+
+    # Update listing gauge metric
+    LISTINGS_TOTAL.labels(broker=broker_id, status=new_status).inc()
+
+    logger.info("broker.update_status broker=%s status=%s listing=%s", broker_id, new_status, listing_id)
+    return result
 
 
 def _execute_wait_delay(task_input: dict[str, Any], ctx: TaskExecutionContext) -> dict[str, Any]:
+    from datetime import datetime, timedelta
+
     hours = int(task_input.get("hours", 0))
     minutes = int(task_input.get("minutes", 0))
+    seconds = int(task_input.get("seconds", 0))
     reason = task_input.get("reason", "")
-    total_seconds = (hours * 3600) + (minutes * 60)
-    logger.info("wait.delay seconds=%d reason=%s", total_seconds, reason)
-    # In MVP, this is a no-op — the scheduler handles re-checking
-    return {"delayed_seconds": total_seconds, "reason": reason, "mode": "scheduler_deferred"}
+    total_seconds = (hours * 3600) + (minutes * 60) + seconds
+
+    now = datetime.utcnow()
+    resume_at = now + timedelta(seconds=total_seconds)
+
+    # Short delays (< 5 min): sleep inline
+    if total_seconds <= 300:
+        if total_seconds > 0:
+            logger.info("wait.delay inline_sleep seconds=%d reason=%s", total_seconds, reason)
+            time.sleep(total_seconds)
+        return {
+            "delayed_seconds": total_seconds,
+            "reason": reason,
+            "mode": "inline_sleep",
+            "resumed_at": datetime.utcnow().isoformat(),
+        }
+
+    # Longer delays: store resume_at for the runner to check
+    logger.info("wait.delay deferred seconds=%d resume_at=%s reason=%s", total_seconds, resume_at.isoformat(), reason)
+    return {
+        "delayed_seconds": total_seconds,
+        "reason": reason,
+        "mode": "deferred",
+        "resume_at": resume_at.isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------

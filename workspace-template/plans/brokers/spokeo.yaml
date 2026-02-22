@@ -1,0 +1,189 @@
+# Spokeo opt-out plan
+# Flow: search → match → approve → submit opt-out → check email → verify → update status
+#
+# Spokeo search URL: https://www.spokeo.com/FirstName-LastName/City/State
+# Spokeo opt-out URL: https://www.spokeo.com/optout
+# Requires: profile URL, email address, CAPTCHA (may need human queue)
+# Verification: email link click within 24-72h
+
+plan_id: broker_spokeo
+version: "1.0.0"
+
+targets:
+  - target_id: spokeo
+    kind: website
+    base_url: https://www.spokeo.com
+
+params_schema:
+  type: object
+  properties:
+    full_name:
+      type: string
+      description: Full legal name of the person
+    first_name:
+      type: string
+    last_name:
+      type: string
+    city:
+      type: string
+    state:
+      type: string
+      description: Two-letter state abbreviation
+    profile_id:
+      type: string
+      description: PII profile ID for identity matching
+    agent_email:
+      type: string
+      description: Agent email address for opt-out verification
+  required:
+    - full_name
+    - city
+    - state
+    - profile_id
+    - agent_email
+
+tasks:
+  # =========================================================================
+  # Step 1: Search for the person on Spokeo
+  # =========================================================================
+  - id: search_listing
+    name: Search Spokeo for person
+    type: scrape.rendered
+    input:
+      target_id: spokeo
+      url_template: "/{{params.first_name}}-{{params.last_name}}/{{params.city}}/{{params.state}}"
+      wait_for: ".search-results, .result-card, [data-search-results]"
+      extract:
+        fields:
+          names: ".result-card .full-name, .search-result-item .name"
+          locations: ".result-card .location, .search-result-item .location"
+          ages: ".result-card .age, .search-result-item .age"
+          profile_urls: ".result-card a[href*='/p'] @href, .search-result-item a @href"
+      screenshot: true
+    timeout_ms: 30000
+    max_attempts: 3
+
+  # =========================================================================
+  # Step 2: Match search results against PII profile
+  # =========================================================================
+  - id: match_results
+    name: Match search results to profile
+    type: match.identity
+    depends_on:
+      - search_listing
+    input:
+      profile_id: "{{params.profile_id}}"
+      listings_ref: "search_listing"
+      threshold: 0.8
+      llm_threshold_low: 0.4
+      llm_threshold_high: 0.8
+    timeout_ms: 60000
+
+  # =========================================================================
+  # Step 3: Record found listings
+  # =========================================================================
+  - id: record_found
+    name: Record discovered listings
+    type: broker.update_status
+    depends_on:
+      - match_results
+    input:
+      broker_id: spokeo
+      profile_id: "{{params.profile_id}}"
+      status: found
+      listing_ref: "match_results.matched"
+      matched_fields_ref: "match_results.matched"
+      confidence: "{{state.match_results.matched[0].confidence}}"
+      listing_url: "{{state.match_results.matched[0].listing.profile_url}}"
+      recheck_days: 30
+
+  # =========================================================================
+  # Step 4: Navigate to opt-out page and submit (requires approval)
+  # =========================================================================
+  - id: submit_optout
+    name: Submit Spokeo opt-out request
+    type: scrape.rendered
+    depends_on:
+      - record_found
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: spokeo
+      url_template: "/optout"
+      wait_for: "form, #optout-form, [data-optout]"
+      actions:
+        - type: fill
+          selector: "input[name='url'], input[placeholder*='URL'], input[type='url'], #listing_url"
+          value_ref: "state.match_results.matched[0].listing.profile_url"
+        - type: fill
+          selector: "input[name='email'], input[type='email'], #email"
+          value_ref: "params.agent_email"
+        - type: click
+          selector: "button[type='submit'], input[type='submit'], #optout-submit, .btn-optout"
+          wait_for: ".confirmation, .success-message, [data-success]"
+      screenshot: true
+    timeout_ms: 60000
+    max_attempts: 2
+
+  # =========================================================================
+  # Step 5: Update status to removal_submitted
+  # =========================================================================
+  - id: record_submitted
+    name: Record opt-out submission
+    type: broker.update_status
+    depends_on:
+      - submit_optout
+    input:
+      broker_id: spokeo
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      listing_id: "{{state.record_found.listing_id}}"
+      action_type: web_form_with_email_verify
+      recheck_days: 7
+
+  # =========================================================================
+  # Step 6: Wait for verification email (poll inbox)
+  # =========================================================================
+  - id: check_verification_email
+    name: Check for Spokeo verification email
+    type: email.check
+    depends_on:
+      - submit_optout
+    input:
+      from_filter: "spokeo.com"
+      subject_filter: "opt-out"
+      wait_minutes: 30
+      poll_interval_seconds: 60
+      extract_links: true
+    timeout_ms: 1920000
+
+  # =========================================================================
+  # Step 7: Click the verification link
+  # =========================================================================
+  - id: click_verify_link
+    name: Click email verification link
+    type: email.click_verify
+    depends_on:
+      - check_verification_email
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success, [data-verified]"
+    timeout_ms: 30000
+    max_attempts: 2
+
+  # =========================================================================
+  # Step 8: Update final status
+  # =========================================================================
+  - id: update_final_status
+    name: Update status to pending verification
+    type: broker.update_status
+    depends_on:
+      - click_verify_link
+    input:
+      broker_id: spokeo
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      listing_id: "{{state.record_found.listing_id}}"
+      confirmation_id: "{{state.check_verification_email.messages[0].message_id}}"
+      notes: "Opt-out submitted and email verified. Pending removal processing (24-72h)."
+      recheck_days: 7
