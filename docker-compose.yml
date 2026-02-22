@@ -1,0 +1,60 @@
+version: "3.9"
+
+services:
+  erasure-executor:
+    build: ./packages/erasure-executor
+    ports:
+      - "8080:8080"
+    environment:
+      ERASURE_EXECUTOR_CONFIG: /etc/erasure-executor/config.yaml
+      ERASURE_EXECUTOR_AUTO_CREATE_SCHEMA: "true"
+      DATABASE_URL: "postgresql+psycopg://erasure:erasure@postgres:5432/erasure"
+      EXECUTOR_TOKEN: "dev-token-change-me"
+      PII_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      AGENT_EMAIL_ADDRESS: "agent@localhost"
+      AGENT_EMAIL_IMAP_HOST: "mailhog"
+      AGENT_EMAIL_SMTP_HOST: "mailhog"
+      AGENT_EMAIL_SMTP_PORT: "1025"
+      AGENT_EMAIL_PASSWORD: ""
+    volumes:
+      - artifacts:/artifacts
+      - ./config/executor.config.yaml:/etc/erasure-executor/config.yaml:ro
+      - ./workspace-template/plans:/plans:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: erasure
+      POSTGRES_PASSWORD: erasure
+      POSTGRES_DB: erasure
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erasure"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+volumes:
+  pg_data:
+  artifacts:

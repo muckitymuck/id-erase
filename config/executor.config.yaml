@@ -1,0 +1,57 @@
+bind_host: "0.0.0.0"
+bind_port: 8080
+
+auth_token: "env:EXECUTOR_TOKEN"
+database_url: "env:DATABASE_URL"
+plans_root: "/plans"
+artifacts_root: "/artifacts"
+
+max_concurrent_runs: 4
+default_timeout_ms: 120000
+run_timeout_ms: 3600000
+run_claim_ttl_seconds: 300
+
+retry:
+  attempts: 3
+  min_delay_ms: 500
+  max_delay_ms: 60000
+  jitter: 0.15
+
+policy:
+  require_idempotency_key: true
+  fail_closed_on_missing_policy: true
+  side_effects_require_approval: true
+  confidence_threshold: 0.8
+  require_approval_first_broker: true
+
+pii:
+  encryption_key: "env:PII_ENCRYPTION_KEY"
+  log_redaction: true
+  artifact_retention:
+    html_days: 7
+    screenshot_days: 30
+    confirmation_days: -1
+
+agent_email:
+  address: "env:AGENT_EMAIL_ADDRESS"
+  imap_host: "env:AGENT_EMAIL_IMAP_HOST"
+  imap_port: 993
+  smtp_host: "env:AGENT_EMAIL_SMTP_HOST"
+  smtp_port: "env:AGENT_EMAIL_SMTP_PORT"
+  password: "env:AGENT_EMAIL_PASSWORD"
+  alternative_addresses: []
+
+browser:
+  headless: true
+  stealth: true
+  default_timeout_ms: 15000
+
+scheduler:
+  enabled: true
+  poll_interval_seconds: 300
+
+llm:
+  provider: "mock"
+  endpoint: "env:LLM_ENDPOINT"
+  api_key: "env:LLM_API_KEY"
+  model: "env:LLM_MODEL"

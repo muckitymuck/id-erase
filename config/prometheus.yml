@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "erasure-executor"
+    static_configs:
+      - targets: ["erasure-executor:8080"]
+    metrics_path: /metrics

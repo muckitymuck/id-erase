@@ -1,0 +1,99 @@
+brokers:
+  - id: spokeo
+    name: Spokeo
+    category: people-search
+    removal_method: web_form_with_email_verify
+    difficulty: easy
+    plan_file: brokers/spokeo.yaml
+    recheck_days: 30
+    notes: "Standard opt-out form, email verification required"
+
+  - id: beenverified
+    name: BeenVerified
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/beenverified.yaml
+    recheck_days: 30
+    notes: "Web form opt-out"
+
+  - id: intelius
+    name: Intelius
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/intelius.yaml
+    recheck_days: 30
+    notes: "Web form opt-out, shares data with Spokeo"
+
+  - id: whitepages
+    name: Whitepages
+    category: people-search
+    removal_method: web_form_with_phone_verify
+    difficulty: medium
+    plan_file: brokers/whitepages.yaml
+    recheck_days: 30
+    notes: "Requires phone verification call"
+
+  - id: familytreenow
+    name: FamilyTreeNow
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/familytreenow.yaml
+    recheck_days: 60
+    notes: "Simple opt-out form"
+
+  - id: truepeoplesearch
+    name: TruePeopleSearch
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/truepeoplesearch.yaml
+    recheck_days: 30
+    notes: "Web form opt-out"
+
+  - id: fastpeoplesearch
+    name: FastPeopleSearch
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/fastpeoplesearch.yaml
+    recheck_days: 30
+    notes: "Web form opt-out"
+
+  - id: radaris
+    name: Radaris
+    category: people-search
+    removal_method: account_required
+    difficulty: hard
+    plan_file: brokers/radaris.yaml
+    recheck_days: 45
+    notes: "Requires account creation to submit removal"
+
+  - id: peoplefinder
+    name: PeopleFinder
+    category: people-search
+    removal_method: web_form
+    difficulty: easy
+    plan_file: brokers/peoplefinder.yaml
+    recheck_days: 30
+    notes: "Web form opt-out"
+
+  - id: acxiom
+    name: Acxiom
+    category: marketing-data
+    removal_method: web_form
+    difficulty: medium
+    plan_file: brokers/acxiom.yaml
+    recheck_days: 90
+    notes: "Marketing data broker, web form opt-out"
+
+  - id: lexisnexis
+    name: LexisNexis
+    category: risk-data
+    removal_method: mail_or_fax
+    difficulty: hard
+    plan_file: null
+    recheck_days: 90
+    notes: "Requires written request — queued for human action"

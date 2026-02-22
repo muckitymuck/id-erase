@@ -1397,7 +1397,27 @@ tasks:
 | GET | `/healthz` | Health check |
 | GET | `/metrics` | Prometheus metrics |
 
-### 11.2 New Endpoints
+### 11.2 Prometheus Metrics
+
+| Metric | Type | Labels | Purpose |
+|--------|------|--------|---------|
+| `erasure_runs_started_total` | Counter | plan_id | Total plan run starts |
+| `erasure_runs_finished_total` | Counter | plan_id, status | Completed runs (succeeded/failed) |
+| `erasure_task_duration_seconds` | Histogram | task_type | Per-task execution time |
+| `erasure_approvals_pending` | Gauge | — | Current pending approval gates |
+| `erasure_listings_total` | Gauge | broker, status | Listings by broker and lifecycle status |
+| `erasure_removals_total` | Counter | broker, result | Removal attempts (succeeded/failed/pending) |
+| `erasure_scans_total` | Counter | broker, result | Broker scan runs (started/succeeded/failed) |
+| `erasure_human_queue_pending` | Gauge | — | Items waiting for human action |
+| `erasure_match_confidence` | Histogram | broker | Distribution of identity match confidence scores |
+
+Key operational insights from these metrics:
+- **Removal success rate** = `erasure_removals_total{result="succeeded"}` / `erasure_removals_total`
+- **Scan failure rate** = `erasure_scans_total{result="failed"}` / `erasure_scans_total` — indicates broken plans
+- **Mean time to removal** = derived from listing status transitions (found → removed timestamps)
+- **Broker coverage** = count of distinct brokers in `erasure_listings_total`
+
+### 11.3 New Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
