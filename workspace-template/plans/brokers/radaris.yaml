@@ -1,0 +1,133 @@
+# Radaris opt-out plan
+# Privacy control: https://radaris.com/control/privacy
+# REQUIRES ACCOUNT — account creation step queued for human if needed
+# Requires: name, city, state, URL, email; CAPTCHA; email verification
+# Processing: 24h after email verification
+
+plan_id: broker_radaris
+version: "1.0.0"
+
+targets:
+  - target_id: radaris
+    kind: website
+    base_url: https://radaris.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    city: {type: string}
+    state: {type: string}
+    profile_id: {type: string}
+    agent_email: {type: string}
+  required: [full_name, city, state, profile_id, agent_email]
+
+tasks:
+  - id: search_listing
+    name: Search Radaris for person
+    type: scrape.rendered
+    input:
+      target_id: radaris
+      url_template: "/p/{{params.first_name}}-{{params.last_name}}/{{params.city}}-{{params.state}}"
+      wait_for: ".search-results, .card-list, [data-results]"
+      extract:
+        fields:
+          names: ".card .name, .person-name, h3"
+          locations: ".card .address, .person-location"
+          ages: ".card .age, .person-age"
+          profile_urls: ".card a @href, h3 a @href"
+      screenshot: true
+    timeout_ms: 30000
+
+  - id: match_results
+    name: Match results to profile
+    type: match.identity
+    depends_on: [search_listing]
+    input:
+      profile_id: "{{params.profile_id}}"
+      listings_ref: "search_listing"
+      threshold: 0.8
+
+  - id: record_found
+    name: Record discovered listings
+    type: broker.update_status
+    depends_on: [match_results]
+    input:
+      broker_id: radaris
+      profile_id: "{{params.profile_id}}"
+      status: found
+      confidence: "{{state.match_results.matched[0].confidence}}"
+      listing_url: "{{state.match_results.matched[0].listing.profile_url}}"
+      recheck_days: 45
+
+  - id: submit_optout
+    name: Submit Radaris privacy control opt-out
+    type: scrape.rendered
+    depends_on: [record_found]
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: radaris
+      url_template: "/control/privacy"
+      wait_for: "form, .privacy-form, .optout-form"
+      actions:
+        - type: fill
+          selector: "input[name='name'], input[placeholder*='Name']"
+          value_ref: "params.full_name"
+        - type: fill
+          selector: "input[name='email'], input[type='email']"
+          value_ref: "params.agent_email"
+        - type: fill
+          selector: "input[name='url'], input[placeholder*='URL']"
+          value_ref: "state.match_results.matched[0].listing.profile_url"
+        - type: click
+          selector: "button[type='submit'], .submit-btn, .optout-btn"
+          wait_for: ".confirmation, .success, .next-step"
+      screenshot: true
+    timeout_ms: 60000
+    max_attempts: 2
+
+  - id: record_submitted
+    name: Record opt-out submission
+    type: broker.update_status
+    depends_on: [submit_optout]
+    input:
+      broker_id: radaris
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: account_required
+      recheck_days: 7
+
+  - id: check_verification_email
+    name: Check for verification email
+    type: email.check
+    depends_on: [submit_optout]
+    input:
+      from_filter: "radaris.com"
+      subject_filter: "verif"
+      wait_minutes: 30
+      poll_interval_seconds: 60
+      extract_links: true
+    timeout_ms: 1920000
+
+  - id: click_verify_link
+    name: Click email verification link
+    type: email.click_verify
+    depends_on: [check_verification_email]
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success"
+    timeout_ms: 30000
+
+  - id: update_final_status
+    name: Update to pending verification
+    type: broker.update_status
+    depends_on: [click_verify_link]
+    input:
+      broker_id: radaris
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      notes: "Opt-out submitted and email verified. Processing ~24h."
+      recheck_days: 7

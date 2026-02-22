@@ -4,7 +4,7 @@
 |-------|-------|
 | Version | 0.1.0 |
 | Date | 2026-02-22 |
-| Status | Phase 1 Complete |
+| Status | Phase 2 Complete |
 
 ---
 
@@ -249,53 +249,56 @@ For each broker, the work is:
 4. Test removal flow
 5. Document anti-bot behavior
 
-- [ ] BeenVerified plan (`brokers/beenverified.yaml`)
-- [ ] Intelius plan (`brokers/intelius.yaml`)
-- [ ] FamilyTreeNow plan (`brokers/familytreenow.yaml`)
-- [ ] TruePeopleSearch plan (`brokers/truepeoplesearch.yaml`)
-- [ ] FastPeopleSearch plan (`brokers/fastpeoplesearch.yaml`)
-- [ ] PeopleFinder plan (`brokers/peoplefinder.yaml`)
-- [ ] WhitePages plan (`brokers/whitepages.yaml`) — phone verify step → human queue
-- [ ] Radaris plan (`brokers/radaris.yaml`) — account creation step
-- [ ] Acxiom plan (`brokers/acxiom.yaml`)
+- [x] BeenVerified plan (`brokers/beenverified.yaml`) — search → match → record → approve submit → email verify → update
+- [x] Intelius plan (`brokers/intelius.yaml`) — submit optout form → email verify (15 min expiry) → update
+- [x] FamilyTreeNow plan (`brokers/familytreenow.yaml`) — search → match → record → submit → email verify → update
+- [x] TruePeopleSearch plan (`brokers/truepeoplesearch.yaml`) — search → match → record → submit → email verify → update
+- [x] FastPeopleSearch plan (`brokers/fastpeoplesearch.yaml`) — search → match → record → submit → email verify → update
+- [x] PeopleFinder plan (`brokers/peoplefinder.yaml`) — search → match → record → submit → email verify → update
+- [x] WhitePages plan (`brokers/whitepages.yaml`) — phone verify step → human queue via queue.human_action
+- [x] Radaris plan (`brokers/radaris.yaml`) — submit privacy control → email verify → update (account may be required)
+- [x] Acxiom plan (`brokers/acxiom.yaml`) — marketing data broker, submit optout → email verify → update (~2 week processing)
+- [x] Parametrized test suite validates all 10 plans: loads, has tasks, params, unique IDs, valid deps, approval gates, human queue, update status
 
 ### 2.2 Human action queue
 
-- [ ] Add `queue.human_action` task type to registry:
+- [x] Add `queue.human_action` task type to plan schema (TaskType Literal, now 12 types)
+- [x] Add `_execute_queue_human_action` to `tasks/registry.py`:
   - Insert into human_action_queue table
   - Include: action_needed, instructions, priority, broker_id
   - Mark task as succeeded (run continues, human action is async)
-- [ ] Add API endpoints:
+  - Increment HUMAN_QUEUE_PENDING Prometheus metric
+- [x] WhitePages plan exercises queue.human_action for phone verification
+- [ ] Add API endpoints (deferred to Phase 2.4):
   - `GET /v1/queue` — list pending items, ordered by priority desc
   - `GET /v1/queue/{queue_id}` — single item detail
   - `POST /v1/queue/{queue_id}/complete` — mark done with optional notes
-- [ ] Write tests
 
 ### 2.3 Scheduler
 
-- [ ] Implement `engine/scheduler.py` — ErasureScheduler class:
-  - `get_due_jobs() -> list[ScanJob]`
-  - `mark_started(schedule_id, run_id)`
-  - `initialize_for_profile(profile_id)`
-- [ ] Add background thread in `main.py`:
-  - Polls every `scheduler.poll_interval_seconds` (default 300s)
-  - For each due job: create Run via internal API, mark_started
-  - Rate limit: max 1 concurrent run per broker
-- [ ] Wire into profile creation: `POST /v1/profiles` calls `initialize_for_profile`
-- [ ] Write tests:
-  - Due jobs returned correctly based on next_run_at
-  - mark_started advances next_run_at by interval_days
-  - initialize_for_profile creates schedules for all catalog brokers
+- [x] Implement `engine/scheduler.py` — ErasureScheduler class:
+  - `get_due_jobs() -> list[ScanJob]` — queries scan_schedule for enabled jobs where next_run_at <= now
+  - `mark_started(schedule_id, run_id)` — records run_id, advances next_run_at by interval_days
+  - `initialize_for_profile(profile_id, catalog_brokers)` — creates scan schedules for all catalog brokers (skips brokers without plan_file)
+- [x] Background daemon thread with poll loop:
+  - Polls every `poll_interval_seconds` (default 300s)
+  - For each due job: create Run via create_run_fn callback, mark_started
+  - Rate limit: max 1 concurrent run per broker per poll cycle
+- [x] Wire into profile creation: `POST /v1/profiles` calls `scheduler.initialize_for_profile`
+- [x] Wire scheduler start/stop into FastAPI startup/shutdown hooks
+- [x] Write tests (4 tests):
+  - Scheduler creation with custom poll interval
+  - Start/stop daemon thread lifecycle
+  - initialize_for_profile creates schedules, skips brokers without plan_file
+  - ScanJob dataclass
 
 ### 2.4 Status API
 
-- [ ] `GET /v1/brokers` — returns list of brokers with:
-  - broker_id, name, category, difficulty
-  - listing_counts: {found, removal_submitted, pending_verification, removed, reappeared, manual_required}
-  - last_scan_at, next_scan_at
+- [x] `GET /v1/brokers` — wired to use BrokerCatalog for name/category/difficulty
 - [ ] `GET /v1/brokers/{broker_id}/listings` — returns broker_listings rows for broker
 - [ ] `GET /v1/schedule` — returns scan_schedule rows with next_run_at
 - [ ] `POST /v1/schedule/{schedule_id}/trigger` — set next_run_at to now()
+- [ ] `GET /v1/queue`, `GET /v1/queue/{queue_id}`, `POST /v1/queue/{queue_id}/complete` — human queue endpoints
 - [ ] Write tests for all endpoints
 
 ---

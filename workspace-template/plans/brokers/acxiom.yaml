@@ -1,0 +1,97 @@
+# Acxiom opt-out plan
+# Opt-out URL: https://isapps.acxiom.com/optout/optout.aspx
+# Marketing data broker — different from people-search sites
+# Requires: email, personal info; email verification; CAPTCHA
+# Processing: ~2 weeks
+# Note: Opt-out doesn't affect data already shared with marketers
+
+plan_id: broker_acxiom
+version: "1.0.0"
+
+targets:
+  - target_id: acxiom
+    kind: website
+    base_url: https://isapps.acxiom.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    city: {type: string}
+    state: {type: string}
+    profile_id: {type: string}
+    agent_email: {type: string}
+  required: [full_name, profile_id, agent_email]
+
+tasks:
+  - id: submit_optout
+    name: Submit Acxiom opt-out form
+    type: scrape.rendered
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: acxiom
+      url_template: "/optout/optout.aspx"
+      wait_for: "form, #optout-form"
+      actions:
+        - type: fill
+          selector: "input[name='firstName'], input[id*='FirstName']"
+          value_ref: "params.first_name"
+        - type: fill
+          selector: "input[name='lastName'], input[id*='LastName']"
+          value_ref: "params.last_name"
+        - type: fill
+          selector: "input[name='email'], input[type='email'], input[id*='Email']"
+          value_ref: "params.agent_email"
+        - type: click
+          selector: "button[type='submit'], input[type='submit'], .submit-btn"
+          wait_for: ".confirmation, .success, .thank-you"
+      screenshot: true
+    timeout_ms: 60000
+    max_attempts: 2
+
+  - id: record_submitted
+    name: Record opt-out submission
+    type: broker.update_status
+    depends_on: [submit_optout]
+    input:
+      broker_id: acxiom
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: web_form
+      notes: "Marketing data broker. Opt-out does not affect already-shared data."
+      recheck_days: 21
+
+  - id: check_verification_email
+    name: Check for Acxiom confirmation email
+    type: email.check
+    depends_on: [submit_optout]
+    input:
+      from_filter: "acxiom.com"
+      subject_filter: "opt"
+      wait_minutes: 60
+      poll_interval_seconds: 120
+      extract_links: true
+    timeout_ms: 3600000
+
+  - id: click_verify_link
+    name: Click confirmation link
+    type: email.click_verify
+    depends_on: [check_verification_email]
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success, .thank-you"
+    timeout_ms: 30000
+
+  - id: update_final_status
+    name: Update to pending verification
+    type: broker.update_status
+    depends_on: [click_verify_link]
+    input:
+      broker_id: acxiom
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      notes: "Opt-out submitted. Processing ~2 weeks."
+      recheck_days: 21

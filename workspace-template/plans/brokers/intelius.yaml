@@ -1,0 +1,97 @@
+# Intelius opt-out plan
+# Opt-out URL: https://www.intelius.com/optout
+# Requires: email, DOB, full name; email verification (15 min expiry)
+# Note: Phone verification calls may occur; shares data with Spokeo
+# Processing: 72h - 10 days
+
+plan_id: broker_intelius
+version: "1.0.0"
+
+targets:
+  - target_id: intelius
+    kind: website
+    base_url: https://www.intelius.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    date_of_birth: {type: string, description: "YYYY-MM-DD"}
+    profile_id: {type: string}
+    agent_email: {type: string}
+  required: [full_name, date_of_birth, profile_id, agent_email]
+
+tasks:
+  - id: submit_optout
+    name: Submit Intelius opt-out form
+    type: scrape.rendered
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: intelius
+      url_template: "/optout"
+      wait_for: "form, .optout-form"
+      actions:
+        - type: fill
+          selector: "input[name='firstName'], input[placeholder*='First']"
+          value_ref: "params.first_name"
+        - type: fill
+          selector: "input[name='lastName'], input[placeholder*='Last']"
+          value_ref: "params.last_name"
+        - type: fill
+          selector: "input[name='email'], input[type='email']"
+          value_ref: "params.agent_email"
+        - type: fill
+          selector: "input[name='dateOfBirth'], input[name='dob'], input[type='date']"
+          value_ref: "params.date_of_birth"
+        - type: click
+          selector: "button[type='submit'], .optout-submit"
+          wait_for: ".confirmation, .success"
+      screenshot: true
+    timeout_ms: 60000
+    max_attempts: 2
+
+  - id: record_submitted
+    name: Record opt-out submission
+    type: broker.update_status
+    depends_on: [submit_optout]
+    input:
+      broker_id: intelius
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: web_form
+      recheck_days: 14
+
+  - id: check_verification_email
+    name: Check for Intelius verification email
+    type: email.check
+    depends_on: [submit_optout]
+    input:
+      from_filter: "intelius.com"
+      subject_filter: "opt"
+      wait_minutes: 15
+      poll_interval_seconds: 30
+      extract_links: true
+    timeout_ms: 960000
+
+  - id: click_verify_link
+    name: Click email verification link
+    type: email.click_verify
+    depends_on: [check_verification_email]
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success"
+    timeout_ms: 30000
+
+  - id: update_final_status
+    name: Update to pending verification
+    type: broker.update_status
+    depends_on: [click_verify_link]
+    input:
+      broker_id: intelius
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      notes: "Opt-out submitted and email verified. Processing 72h-10 days."
+      recheck_days: 14

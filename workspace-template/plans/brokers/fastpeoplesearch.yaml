@@ -1,0 +1,124 @@
+# FastPeopleSearch removal plan
+# Removal URL: https://www.fastpeoplesearch.com/removal
+# Requires: email, full name, city, state; email verification (24h expiry); CAPTCHA
+# Processing: 72h (often 1 day)
+
+plan_id: broker_fastpeoplesearch
+version: "1.0.0"
+
+targets:
+  - target_id: fastpeoplesearch
+    kind: website
+    base_url: https://www.fastpeoplesearch.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    city: {type: string}
+    state: {type: string}
+    profile_id: {type: string}
+    agent_email: {type: string}
+  required: [full_name, city, state, profile_id, agent_email]
+
+tasks:
+  - id: search_listing
+    name: Search FastPeopleSearch
+    type: scrape.rendered
+    input:
+      target_id: fastpeoplesearch
+      url_template: "/name/{{params.first_name}}-{{params.last_name}}_{{params.city}}-{{params.state}}"
+      wait_for: ".search-results, .people-list, [data-results]"
+      extract:
+        fields:
+          names: ".card-title, .people-name, h2 a"
+          locations: ".card-location, .people-location"
+          ages: ".card-age, .people-age"
+          profile_urls: ".card-title a @href, .people-name a @href"
+      screenshot: true
+    timeout_ms: 30000
+
+  - id: match_results
+    name: Match results to profile
+    type: match.identity
+    depends_on: [search_listing]
+    input:
+      profile_id: "{{params.profile_id}}"
+      listings_ref: "search_listing"
+      threshold: 0.8
+
+  - id: record_found
+    name: Record discovered listings
+    type: broker.update_status
+    depends_on: [match_results]
+    input:
+      broker_id: fastpeoplesearch
+      profile_id: "{{params.profile_id}}"
+      status: found
+      confidence: "{{state.match_results.matched[0].confidence}}"
+      recheck_days: 30
+
+  - id: submit_removal
+    name: Submit FastPeopleSearch removal
+    type: scrape.rendered
+    depends_on: [record_found]
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: fastpeoplesearch
+      url_template: "/removal"
+      wait_for: "form"
+      actions:
+        - type: fill
+          selector: "input[name='email'], input[type='email']"
+          value_ref: "params.agent_email"
+        - type: click
+          selector: "button[type='submit'], .submit-btn"
+          wait_for: ".confirmation, .success"
+      screenshot: true
+    timeout_ms: 60000
+
+  - id: record_submitted
+    name: Record removal submission
+    type: broker.update_status
+    depends_on: [submit_removal]
+    input:
+      broker_id: fastpeoplesearch
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: web_form
+      recheck_days: 7
+
+  - id: check_verification_email
+    name: Check for verification email
+    type: email.check
+    depends_on: [submit_removal]
+    input:
+      from_filter: "fastpeoplesearch.com"
+      subject_filter: "remov"
+      wait_minutes: 30
+      poll_interval_seconds: 60
+      extract_links: true
+    timeout_ms: 1920000
+
+  - id: click_verify_link
+    name: Click verification link
+    type: email.click_verify
+    depends_on: [check_verification_email]
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success"
+    timeout_ms: 30000
+
+  - id: update_final_status
+    name: Update to pending verification
+    type: broker.update_status
+    depends_on: [click_verify_link]
+    input:
+      broker_id: fastpeoplesearch
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      notes: "Removal submitted and email verified. Processing ~72h."
+      recheck_days: 7

@@ -673,6 +673,45 @@ def _execute_broker_update_status(task_input: dict[str, Any], ctx: TaskExecution
     return result
 
 
+def _execute_queue_human_action(task_input: dict[str, Any], ctx: TaskExecutionContext) -> dict[str, Any]:
+    """Queue an action for a human operator (phone verify, CAPTCHA, postal mail, etc.).
+
+    The task succeeds immediately — the human action is async.
+    The run continues; the human completes the queue item via the API.
+    """
+    from erasure_executor.metrics import HUMAN_QUEUE_PENDING
+    import uuid as _uuid
+
+    broker_id = task_input.get("broker_id", "unknown")
+    action_needed = task_input.get("action_needed", "manual action required")
+    instructions = task_input.get("instructions")
+    priority = int(task_input.get("priority", 0))
+    listing_id = task_input.get("listing_id")
+
+    # Resolve instructions from refs if needed
+    instructions_ref = task_input.get("instructions_ref")
+    if instructions_ref:
+        resolved = _value_from_ref(instructions_ref, ctx)
+        if isinstance(resolved, str):
+            instructions = resolved
+
+    queue_id = str(_uuid.uuid4())
+
+    result = {
+        "queue_id": queue_id,
+        "broker_id": broker_id,
+        "listing_id": listing_id,
+        "action_needed": action_needed,
+        "instructions": instructions,
+        "priority": priority,
+        "status": "pending",
+    }
+
+    HUMAN_QUEUE_PENDING.inc()
+    logger.info("queue.human_action broker=%s action=%s queue_id=%s", broker_id, action_needed, queue_id)
+    return result
+
+
 def _execute_wait_delay(task_input: dict[str, Any], ctx: TaskExecutionContext) -> dict[str, Any]:
     from datetime import datetime, timedelta
 
@@ -742,6 +781,8 @@ def execute_task(
                 result = _execute_match_identity(resolved_input, ctx, timeout_ms)
             elif task_type == "broker.update_status":
                 result = _execute_broker_update_status(resolved_input, ctx)
+            elif task_type == "queue.human_action":
+                result = _execute_queue_human_action(resolved_input, ctx)
             elif task_type == "wait.delay":
                 result = _execute_wait_delay(resolved_input, ctx)
             elif task_type == "llm.json":

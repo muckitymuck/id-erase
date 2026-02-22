@@ -14,6 +14,7 @@ TaskType = Literal[
     "email.click_verify",
     "match.identity",
     "broker.update_status",
+    "queue.human_action",
     "wait.delay",
     "llm.json",
 ]

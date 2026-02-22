@@ -1,0 +1,140 @@
+# FamilyTreeNow opt-out plan
+# Opt-out URL: https://www.familytreenow.com/optout
+# Requires: name, city, state, birth year; email verification (24h expiry)
+# Processing: 72h / 2-5 business days
+
+plan_id: broker_familytreenow
+version: "1.0.0"
+
+targets:
+  - target_id: familytreenow
+    kind: website
+    base_url: https://www.familytreenow.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    city: {type: string}
+    state: {type: string}
+    birth_year: {type: string}
+    profile_id: {type: string}
+    agent_email: {type: string}
+  required: [full_name, city, state, profile_id, agent_email]
+
+tasks:
+  - id: search_listing
+    name: Search FamilyTreeNow
+    type: scrape.rendered
+    input:
+      target_id: familytreenow
+      url_template: "/optout"
+      wait_for: "form, .search-form"
+      actions:
+        - type: fill
+          selector: "input[name='firstName'], input[placeholder*='First']"
+          value_ref: "params.first_name"
+        - type: fill
+          selector: "input[name='lastName'], input[placeholder*='Last']"
+          value_ref: "params.last_name"
+        - type: fill
+          selector: "input[name='city'], input[placeholder*='City']"
+          value_ref: "params.city"
+        - type: fill
+          selector: "select[name='state'], input[name='state']"
+          value_ref: "params.state"
+        - type: click
+          selector: "button[type='submit'], .search-btn"
+          wait_for: ".results, .search-results"
+      extract:
+        fields:
+          names: ".result .name, .record-name"
+          locations: ".result .location, .record-location"
+          ages: ".result .age, .record-age"
+      screenshot: true
+    timeout_ms: 30000
+
+  - id: match_results
+    name: Match results to profile
+    type: match.identity
+    depends_on: [search_listing]
+    input:
+      profile_id: "{{params.profile_id}}"
+      listings_ref: "search_listing"
+      threshold: 0.8
+
+  - id: record_found
+    name: Record discovered listings
+    type: broker.update_status
+    depends_on: [match_results]
+    input:
+      broker_id: familytreenow
+      profile_id: "{{params.profile_id}}"
+      status: found
+      confidence: "{{state.match_results.matched[0].confidence}}"
+      recheck_days: 60
+
+  - id: submit_optout
+    name: Submit opt-out request
+    type: scrape.rendered
+    depends_on: [record_found]
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: familytreenow
+      url_template: "/optout"
+      wait_for: "form"
+      actions:
+        - type: fill
+          selector: "input[name='email'], input[type='email']"
+          value_ref: "params.agent_email"
+        - type: click
+          selector: "button[type='submit'], .optout-btn"
+          wait_for: ".confirmation, .success"
+      screenshot: true
+    timeout_ms: 60000
+
+  - id: record_submitted
+    name: Record opt-out submission
+    type: broker.update_status
+    depends_on: [submit_optout]
+    input:
+      broker_id: familytreenow
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: web_form
+      recheck_days: 7
+
+  - id: check_verification_email
+    name: Check for verification email
+    type: email.check
+    depends_on: [submit_optout]
+    input:
+      from_filter: "familytreenow.com"
+      subject_filter: "opt"
+      wait_minutes: 30
+      poll_interval_seconds: 60
+      extract_links: true
+    timeout_ms: 1920000
+
+  - id: click_verify_link
+    name: Click verification link
+    type: email.click_verify
+    depends_on: [check_verification_email]
+    input:
+      link_ref: "state.check_verification_email.links[0]"
+      wait_for: ".confirmation, .success"
+    timeout_ms: 30000
+
+  - id: update_final_status
+    name: Update to pending verification
+    type: broker.update_status
+    depends_on: [click_verify_link]
+    input:
+      broker_id: familytreenow
+      profile_id: "{{params.profile_id}}"
+      status: pending_verification
+      notes: "Opt-out submitted and email verified. Processing 72h-5 days."
+      recheck_days: 7

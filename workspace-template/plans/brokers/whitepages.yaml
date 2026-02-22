@@ -1,0 +1,122 @@
+# WhitePages opt-out plan
+# Suppression URL: https://www.whitepages.com/suppression-requests
+# REQUIRES PHONE VERIFICATION — queued for human action
+# Requires: profile URL, reason, phone number for verification call
+# Processing: 24h after verification
+
+plan_id: broker_whitepages
+version: "1.0.0"
+
+targets:
+  - target_id: whitepages
+    kind: website
+    base_url: https://www.whitepages.com
+
+params_schema:
+  type: object
+  properties:
+    full_name: {type: string}
+    first_name: {type: string}
+    last_name: {type: string}
+    city: {type: string}
+    state: {type: string}
+    profile_id: {type: string}
+  required: [full_name, city, state, profile_id]
+
+tasks:
+  - id: search_listing
+    name: Search WhitePages for person
+    type: scrape.rendered
+    input:
+      target_id: whitepages
+      url_template: "/name/{{params.first_name}}-{{params.last_name}}/{{params.city}}-{{params.state}}"
+      wait_for: ".search-results, .serp-results, [data-results]"
+      extract:
+        fields:
+          names: ".serp-result .name, .person-name, h3 a"
+          locations: ".serp-result .location, .person-location"
+          ages: ".serp-result .age, .person-age"
+          profile_urls: ".serp-result a @href, h3 a @href"
+      screenshot: true
+    timeout_ms: 30000
+
+  - id: match_results
+    name: Match results to profile
+    type: match.identity
+    depends_on: [search_listing]
+    input:
+      profile_id: "{{params.profile_id}}"
+      listings_ref: "search_listing"
+      threshold: 0.8
+
+  - id: record_found
+    name: Record discovered listings
+    type: broker.update_status
+    depends_on: [match_results]
+    input:
+      broker_id: whitepages
+      profile_id: "{{params.profile_id}}"
+      status: found
+      confidence: "{{state.match_results.matched[0].confidence}}"
+      listing_url: "{{state.match_results.matched[0].listing.profile_url}}"
+      recheck_days: 30
+
+  - id: submit_suppression
+    name: Submit suppression request
+    type: scrape.rendered
+    depends_on: [record_found]
+    requires_approval: true
+    idempotent: false
+    input:
+      target_id: whitepages
+      url_template: "/suppression-requests"
+      wait_for: "form, .suppression-form"
+      actions:
+        - type: fill
+          selector: "input[name='url'], input[placeholder*='URL'], input[name='profileUrl']"
+          value_ref: "state.match_results.matched[0].listing.profile_url"
+        - type: click
+          selector: "button[type='submit'], .submit-btn"
+          wait_for: ".phone-verify, .verification, .next-step"
+      screenshot: true
+    timeout_ms: 60000
+
+  - id: record_submitted
+    name: Record suppression submission
+    type: broker.update_status
+    depends_on: [submit_suppression]
+    input:
+      broker_id: whitepages
+      profile_id: "{{params.profile_id}}"
+      status: removal_submitted
+      action_type: web_form_with_phone_verify
+      recheck_days: 7
+
+  # WhitePages requires a phone call for verification — queue for human
+  - id: queue_phone_verify
+    name: Queue phone verification for human
+    type: queue.human_action
+    depends_on: [submit_suppression]
+    input:
+      broker_id: whitepages
+      listing_id: "{{state.record_found.listing_id}}"
+      action_needed: "phone_verification"
+      instructions: >
+        WhitePages requires phone verification to complete the opt-out.
+        1. You will receive a call from WhitePages
+        2. A four-digit confirmation code will be displayed on screen
+        3. Enter the code when prompted during the call
+        4. Mark this queue item complete after verification
+      priority: 5
+
+  - id: update_status_manual
+    name: Update status to manual_required
+    type: broker.update_status
+    depends_on: [queue_phone_verify]
+    input:
+      broker_id: whitepages
+      profile_id: "{{params.profile_id}}"
+      status: manual_required
+      listing_id: "{{state.record_found.listing_id}}"
+      notes: "Phone verification required. Queued for human action."
+      recheck_days: 7

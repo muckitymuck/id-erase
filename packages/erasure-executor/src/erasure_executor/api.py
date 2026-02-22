@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,8 @@ from erasure_executor.schemas.models import (
     RunStatusResponse,
     StartRunRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_ARTIFACT_BYTES = 1_000_000
 
@@ -102,7 +105,13 @@ def _read_artifact_payload(path: Path, content_type: str) -> tuple[Any | None, s
     return None, text
 
 
-def build_app(config: ExecutorConfig, session_factory, runner: Runner) -> FastAPI:
+def build_app(
+    config: ExecutorConfig,
+    session_factory,
+    runner: Runner,
+    catalog=None,
+    scheduler=None,
+) -> FastAPI:
     app = FastAPI(title="id-erase Executor", version="0.1.0")
 
     vault = PIIVault.from_hex(config.pii.encryption_key) if config.pii.encryption_key else None
@@ -110,10 +119,14 @@ def build_app(config: ExecutorConfig, session_factory, runner: Runner) -> FastAP
     @app.on_event("startup")
     def on_startup() -> None:
         runner.start()
+        if scheduler and config.scheduler.enabled:
+            scheduler.start()
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:
         runner.stop()
+        if scheduler:
+            scheduler.stop()
 
     # -----------------------------------------------------------------------
     # Health & Metrics
@@ -292,6 +305,18 @@ def build_app(config: ExecutorConfig, session_factory, runner: Runner) -> FastAP
         with session_factory() as session:
             session.add(profile)
             session.commit()
+
+            # Initialize scan schedules for the new profile
+            if scheduler and catalog:
+                try:
+                    broker_dicts = [
+                        {"id": b.id, "plan_file": b.plan_file, "recheck_days": b.recheck_days}
+                        for b in catalog.all()
+                    ]
+                    scheduler.initialize_for_profile(profile.profile_id, broker_dicts)
+                except Exception:
+                    logger.exception("Failed to initialize scan schedules for profile %s", profile.profile_id)
+
             return ProfileMetadataResponse(
                 profile_id=profile.profile_id, label=profile.label,
                 data_hash=profile.data_hash, created_at=profile.created_at,
@@ -355,15 +380,33 @@ def build_app(config: ExecutorConfig, session_factory, runner: Runner) -> FastAP
                     "next_scan_at": s.next_run_at,
                 }
 
+            # Build results from catalog (if available) + any DB-only brokers
             results = []
+            seen: set[str] = set()
+
+            if catalog:
+                for entry in catalog.all():
+                    seen.add(entry.id)
+                    sched = schedule_map.get(entry.id, {})
+                    results.append(BrokerStatusResponse(
+                        broker_id=entry.id, name=entry.name, category=entry.category,
+                        difficulty=entry.difficulty,
+                        listing_counts=broker_counts.get(entry.id, {}),
+                        last_scan_at=sched.get("last_scan_at"),
+                        next_scan_at=sched.get("next_scan_at"),
+                    ))
+
+            # Add any brokers in DB not in catalog
             for broker_id, status_counts in broker_counts.items():
-                sched = schedule_map.get(broker_id, {})
-                results.append(BrokerStatusResponse(
-                    broker_id=broker_id, name=broker_id, category="people-search",
-                    difficulty="unknown", listing_counts=status_counts,
-                    last_scan_at=sched.get("last_scan_at"),
-                    next_scan_at=sched.get("next_scan_at"),
-                ))
+                if broker_id not in seen:
+                    sched = schedule_map.get(broker_id, {})
+                    results.append(BrokerStatusResponse(
+                        broker_id=broker_id, name=broker_id, category="unknown",
+                        difficulty="unknown", listing_counts=status_counts,
+                        last_scan_at=sched.get("last_scan_at"),
+                        next_scan_at=sched.get("next_scan_at"),
+                    ))
+
             return results
 
     @app.get("/v1/brokers/{broker_id}/listings", response_model=list[BrokerListingResponse])
