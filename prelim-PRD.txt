@@ -1,0 +1,9 @@
+This will be a openclaw agent variant that will crawl the internet and known data brokers and do what it can to remove that data from the public.  read this for more context: https://chatgpt.com/share/699a9c09-0884-8009-8142-0080fa09aa18
+
+1.   Self hosted for now.  This will be a MVP to a larger app
+
+2. approval gatin when necessary, the agent will have it's own email and a record of possible alternative emails to use.  It can also queue up human interaction if it is not able to accomplish on its own.
+
+3. Depth as a short term POC but a growing breadth as it discovers more sources
+
+4.  openclaw is a project to base our own project on.  We will control the MVP
