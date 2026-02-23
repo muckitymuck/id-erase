@@ -15,6 +15,7 @@ TaskType = Literal[
     "match.identity",
     "broker.update_status",
     "queue.human_action",
+    "captcha.solve",
     "wait.delay",
     "llm.json",
 ]

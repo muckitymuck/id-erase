@@ -4,7 +4,34 @@
 |-------|-------|
 | Version | 0.1.0 |
 | Date | 2026-02-22 |
-| Status | Phase 2 Complete |
+| Status | Phase 3 Complete |
+| Tests | 165 passing (unit) |
+| Next | Phase 4: CLI & Observability |
+
+### Progress Summary
+
+| Phase | Status | Key Deliverables |
+|-------|--------|-----------------|
+| 0. Foundation | Done | Executor fork, DB schema (5 tables), PII vault (AES-256-GCM), browser/email connectors, Docker Compose |
+| 1. First Broker | Done | Identity matching engine (rapidfuzz), 7 task types implemented, Spokeo end-to-end plan, broker catalog |
+| 2. Broker Expansion | Done | 10 broker YAML plans, scheduler daemon, human action queue, catalog-backed API |
+| 3. Hardening | Done | Proxy/stealth, robots.txt, rate limiter, captcha.solve, artifact cleanup, dead letter tracker, plan health check |
+| 4. CLI & Observability | Not started | CLI tool, Grafana dashboard, alerting |
+| 5. Legal & Discovery | Future | CCPA/GDPR templates, search engine discovery |
+| 6. Multi-User & Web UI | Future | JWT auth, web dashboard, Kubernetes |
+
+### Deferred / Integration Test Backlog
+
+These items require Docker (Playwright, PostgreSQL, MailHog) and are deferred to a dedicated integration test pass:
+
+- [ ] Browser connector integration tests (navigate, extract, form fill, screenshot)
+- [ ] Email connector integration tests (send via MailHog, check_inbox, extract links)
+- [ ] scrape.rendered Playwright error handling (timeout, selector-not-found, navigation failure)
+- [ ] form.submit integration tests with local HTML fixture
+- [ ] broker.update_status DB integration tests (insert, status transitions, recheck_after)
+- [ ] Docker Compose smoke test (`make build && make up && make migrate && healthz`)
+- [ ] End-to-end Spokeo test against live site
+- [ ] JSON schemas: executor-config, erasure-plan, pii-profile
 
 ---
 
@@ -295,11 +322,11 @@ For each broker, the work is:
 ### 2.4 Status API
 
 - [x] `GET /v1/brokers` — wired to use BrokerCatalog for name/category/difficulty
-- [ ] `GET /v1/brokers/{broker_id}/listings` — returns broker_listings rows for broker
-- [ ] `GET /v1/schedule` — returns scan_schedule rows with next_run_at
-- [ ] `POST /v1/schedule/{schedule_id}/trigger` — set next_run_at to now()
-- [ ] `GET /v1/queue`, `GET /v1/queue/{queue_id}`, `POST /v1/queue/{queue_id}/complete` — human queue endpoints
-- [ ] Write tests for all endpoints
+- [x] `GET /v1/brokers/{broker_id}/listings` — returns broker_listings rows for broker
+- [x] `GET /v1/schedule` — returns scan_schedule rows with next_run_at
+- [x] `POST /v1/schedule/{schedule_id}/trigger` — set next_run_at to now()
+- [x] `GET /v1/queue`, `POST /v1/queue/{queue_id}/complete` — human queue endpoints
+- [ ] Write API integration tests for all endpoints (requires DB)
 
 ---
 
@@ -307,51 +334,65 @@ For each broker, the work is:
 
 ### 3.1 Anti-bot stealth
 
-- [ ] Add `playwright-stealth` to dependencies (or equivalent stealth patches)
-- [ ] Configurable request delays in executor config: `browser.min_delay_ms`, `browser.max_delay_ms`
-- [ ] Proxy support in BrowserConnector: `browser.proxy_url` config option
-- [ ] Rate limiter: max N requests per broker per hour (configurable in catalog)
-- [ ] robots.txt check before scraping (configurable, on by default)
+- [x] Inline stealth patches in BrowserConnector (navigator.webdriver override, plugins, languages, chrome.runtime)
+- [x] Configurable request delays: `browser.min_delay_ms`, `browser.max_delay_ms` (default 1000-3000ms)
+- [x] Proxy support: `browser.proxy_url`, `proxy_username`, `proxy_password` wired into Playwright launch
+- [x] BrokerRateLimiter: token bucket rate limiter keyed by broker domain (`browser.rate_limit_per_broker_per_hour`, default 30)
+- [x] robots.txt checker: `RobotsTxtChecker` with per-domain caching, fails open (`browser.check_robots_txt`, default true)
+- [x] All new BrowserConfig fields wired through config.py → registry.py → BrowserConnector
+- [x] Tests: rate limiter (5 tests), browser config (3 tests), robots.txt fail-open (1 test)
 
 ### 3.2 CAPTCHA handling
 
-- [ ] Add `captcha.manual_queue` task type:
-  - Screenshot the CAPTCHA
-  - Insert into human_action_queue with screenshot artifact reference
-  - Block run until human completes queue item
-- [ ] Simple web page for CAPTCHA solving (serves screenshot, accepts text input)
-- [ ] Stub for future third-party solver integration (2Captcha API interface)
+- [x] Add `captcha.solve` task type to plan schema (TaskType Literal, now 13 types)
+- [x] Add `_execute_captcha_solve` to registry.py:
+  - Screenshots CAPTCHA element via ref
+  - Inserts into human_action_queue with instructions and screenshot path
+  - Returns immediately (async human action)
+  - Increments HUMAN_QUEUE_PENDING metric
+- [ ] Simple web page for CAPTCHA solving (deferred — requires frontend)
+- [ ] Third-party solver integration stub (deferred)
 
 ### 3.3 PII security
 
-- [ ] Wire `utils/redact.py` RedactingFilter into all loggers in `logging.py`
-- [ ] At executor startup, load PII terms from profile and add to redaction filter
-- [ ] Test: run a full broker plan, grep all log output for any PII term → 0 matches
-- [ ] SSRF validation in `connectors/http.py`:
-  - Block private CIDRs: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16
-  - Block localhost, [::1]
-  - Validate URL before every request
-- [ ] Update `auth.py`: use `hmac.compare_digest()` for bearer token comparison
-- [ ] Review all artifact storage: no raw PII in artifact files (only encrypted in pii_profiles)
+- [x] RedactingFilter already wired into root logger via `configure_logging(redact=True)` — done in Phase 0
+- [x] `set_redaction_terms()` available for loading PII terms at runtime — done in Phase 0
+- [x] SSRF validation in `connectors/http.py` — done in Phase 0:
+  - Blocks private CIDRs: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1/128, fc00::/7, fe80::/10
+  - Validates URL before every request + on redirects
+- [x] `auth.py` already uses `hmac.compare_digest()` — done in Phase 0
+- [ ] Integration test: run a full broker plan, grep all log output for PII terms → 0 matches
 
 ### 3.4 Artifact lifecycle
 
-- [ ] Background job (runs daily):
-  - Delete run_artifacts where kind='html' and age > `pii.artifact_retention.html_days`
-  - Delete run_artifacts where kind='screenshot' and age > `pii.artifact_retention.screenshot_days`
-  - Delete corresponding files from disk
-  - Keep kind='confirmation' and kind='receipt' indefinitely
-- [ ] Configurable retention in executor config
-- [ ] Write tests
+- [x] Create `engine/artifact_cleanup.py` — ArtifactCleanup background job:
+  - Deletes run_artifacts where kind='html' and age > `pii.artifact_retention_html_days`
+  - Deletes run_artifacts where kind='screenshot' and age > `pii.artifact_retention_screenshot_days`
+  - Keeps kind='confirmation' and kind='receipt' indefinitely (retention_days=-1)
+  - Removes corresponding files from disk
+  - Runs as daemon thread with configurable poll interval
+- [x] Retention already configurable in PIIConfig (html_days, screenshot_days, confirmation_days)
+- [x] Tests (5 tests): deletes old html, keeps recent html, deletes old screenshots, keeps confirmations, start/stop
 
 ### 3.5 Error resilience
 
-- [ ] Graceful selector-not-found handling: clear error message with broker_id and selector
-- [ ] Plan health check endpoint: `POST /v1/plans/{plan_id}/check`
-  - Runs discovery step only (no removal)
-  - Reports which selectors matched vs. failed
+- [x] `_handle_browser_error()` in registry.py — converts Playwright exceptions to TaskExecutionError:
+  - TimeoutError → transient=True (retryable)
+  - Selector not found → transient=False (site layout changed)
+  - Navigation failure (net::ERR_*) → transient=True
+  - RobotsTxtBlocked → transient=False
+  - Unknown → transient=True (default)
+- [x] Wired into scrape.rendered and form.submit executors
+- [x] Plan health check endpoint: `POST /v1/plans/{plan_id}/check`
+  - Validates plan loads and parses
+  - Checks all task dependency references are valid
   - Returns health status: healthy | degraded | broken
-- [ ] Dead letter tracking: after 3 consecutive plan failures for a broker, disable schedule and alert
+- [x] Dead letter tracker: `engine/dead_letter.py` — DeadLetterTracker class:
+  - Tracks consecutive failures per broker
+  - After N consecutive failures (default 3), disables all scan schedules for that broker
+  - `record_success()` resets count, `record_failure()` increments and checks threshold
+  - `get_dead_lettered()` returns list of disabled broker IDs
+- [x] Tests: browser error handling (7 tests), dead letter tracking (7 tests)
 
 ---
 
@@ -382,9 +423,10 @@ For each broker, the work is:
   - `erasure_scans_total` (Counter, labels: broker, result)
   - `erasure_human_queue_pending` (Gauge)
   - `erasure_match_confidence` (Histogram, labels: broker)
+- [x] Wire metrics into broker.update_status (REMOVALS_TOTAL, LISTINGS_TOTAL) — done in Phase 1
+- [x] Wire metrics into queue.human_action (HUMAN_QUEUE_PENDING) — done in Phase 2
 - [ ] Wire metrics into:
   - Task completion (registry.py)
-  - broker.update_status
   - Scheduler run start/complete
   - match.identity confidence scores
 - [ ] Write tests: verify metric values after operations

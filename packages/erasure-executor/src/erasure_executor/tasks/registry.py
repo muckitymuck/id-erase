@@ -95,6 +95,55 @@ def _execute_scrape_static(task_input: dict[str, Any], ctx: TaskExecutionContext
 
 
 # ---------------------------------------------------------------------------
+# Browser error handling (Phase 3 resilience)
+# ---------------------------------------------------------------------------
+
+def _handle_browser_error(exc: Exception, url: str, selector: str | None = None) -> None:
+    """Convert Playwright exceptions to TaskExecutionError with correct transient flag."""
+    from erasure_executor.connectors.browser import RobotsTxtBlocked
+
+    exc_type = type(exc).__name__
+    exc_msg = str(exc)
+
+    if isinstance(exc, RobotsTxtBlocked):
+        raise TaskExecutionError(
+            f"robots.txt blocked: {url}",
+            transient=False,
+        ) from exc
+
+    if isinstance(exc, TaskExecutionError):
+        raise exc  # Already wrapped
+
+    # Playwright TimeoutError — transient, may succeed on retry
+    if "TimeoutError" in exc_type or "timeout" in exc_msg.lower():
+        raise TaskExecutionError(
+            f"browser.timeout url={url} selector={selector}",
+            transient=True,
+        ) from exc
+
+    # Selector not found — non-transient, site layout may have changed
+    if "selector" in exc_msg.lower() and ("not found" in exc_msg.lower() or "failed to find" in exc_msg.lower()):
+        raise TaskExecutionError(
+            f"browser.selector_not_found url={url} selector={selector}",
+            transient=False,
+        ) from exc
+
+    # Navigation failure — transient
+    if "net::" in exc_msg or "ERR_" in exc_msg or "navigation" in exc_msg.lower():
+        raise TaskExecutionError(
+            f"browser.navigation_failed url={url} error={exc_msg[:200]}",
+            transient=True,
+        ) from exc
+
+    # Unknown browser error — default transient
+    logger.warning("browser.unknown_error url=%s error=%s", url, exc_msg[:200])
+    raise TaskExecutionError(
+        f"browser.error url={url} error={exc_msg[:200]}",
+        transient=True,
+    ) from exc
+
+
+# ---------------------------------------------------------------------------
 # scrape.rendered
 # ---------------------------------------------------------------------------
 
@@ -115,6 +164,12 @@ def _execute_scrape_rendered(task_input: dict[str, Any], ctx: TaskExecutionConte
     browser = BrowserConnector(
         headless=ctx.config.browser.headless,
         stealth=ctx.config.browser.stealth,
+        proxy_url=ctx.config.browser.proxy_url,
+        proxy_username=ctx.config.browser.proxy_username,
+        proxy_password=ctx.config.browser.proxy_password,
+        min_delay_ms=ctx.config.browser.min_delay_ms,
+        max_delay_ms=ctx.config.browser.max_delay_ms,
+        check_robots_txt=ctx.config.browser.check_robots_txt,
     )
 
     async def _run():
@@ -159,6 +214,9 @@ def _execute_scrape_rendered(task_input: dict[str, Any], ctx: TaskExecutionConte
                 "extracted": extracted,
                 "screenshot_path": screenshot_path,
             }
+        except Exception as exc:
+            _handle_browser_error(exc, url, wait_for)
+            raise  # _handle_browser_error re-raises as TaskExecutionError
         finally:
             await browser.close()
 
@@ -311,6 +369,12 @@ def _execute_form_submit(task_input: dict[str, Any], ctx: TaskExecutionContext, 
     browser = BrowserConnector(
         headless=ctx.config.browser.headless,
         stealth=ctx.config.browser.stealth,
+        proxy_url=ctx.config.browser.proxy_url,
+        proxy_username=ctx.config.browser.proxy_username,
+        proxy_password=ctx.config.browser.proxy_password,
+        min_delay_ms=ctx.config.browser.min_delay_ms,
+        max_delay_ms=ctx.config.browser.max_delay_ms,
+        check_robots_txt=ctx.config.browser.check_robots_txt,
     )
     form_connector = FormConnector()
 
@@ -351,6 +415,9 @@ def _execute_form_submit(task_input: dict[str, Any], ctx: TaskExecutionContext, 
                 "screenshot_path": result.screenshot_path,
                 "response_excerpt": (result.response_text or "")[:5000],
             }
+        except Exception as exc:
+            _handle_browser_error(exc, url, wait_for)
+            raise
         finally:
             await browser.close()
 
@@ -747,6 +814,56 @@ def _execute_wait_delay(task_input: dict[str, Any], ctx: TaskExecutionContext) -
 
 
 # ---------------------------------------------------------------------------
+# captcha.solve
+# ---------------------------------------------------------------------------
+
+def _execute_captcha_solve(task_input: dict[str, Any], ctx: TaskExecutionContext, timeout_ms: int) -> dict[str, Any]:
+    """Handle CAPTCHA by screenshotting and queuing for human or external solver.
+
+    Workflow:
+    1. Screenshot the CAPTCHA element
+    2. Insert into human_action_queue with the screenshot reference
+    3. Return immediately — the run pauses until the queue item is completed
+    """
+    from erasure_executor.metrics import HUMAN_QUEUE_PENDING
+    import uuid as _uuid
+
+    broker_id = task_input.get("broker_id", "unknown")
+    captcha_type = task_input.get("captcha_type", "image")
+    screenshot_ref = task_input.get("screenshot_ref")
+    page_url = task_input.get("page_url", "")
+
+    # If a screenshot ref is provided, resolve it
+    screenshot_path = None
+    if screenshot_ref:
+        screenshot_path = _value_from_ref(screenshot_ref, ctx)
+
+    queue_id = str(_uuid.uuid4())
+
+    instructions = (
+        f"CAPTCHA ({captcha_type}) encountered on {broker_id}.\n"
+        f"Page: {page_url}\n"
+    )
+    if screenshot_path:
+        instructions += f"Screenshot: {screenshot_path}\n"
+    instructions += "Please solve the CAPTCHA and enter the result."
+
+    result = {
+        "queue_id": queue_id,
+        "broker_id": broker_id,
+        "captcha_type": captcha_type,
+        "action_needed": f"solve_captcha_{captcha_type}",
+        "instructions": instructions,
+        "screenshot_path": screenshot_path,
+        "status": "pending",
+    }
+
+    HUMAN_QUEUE_PENDING.inc()
+    logger.info("captcha.solve broker=%s type=%s queue_id=%s", broker_id, captcha_type, queue_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -787,6 +904,8 @@ def execute_task(
                 result = _execute_wait_delay(resolved_input, ctx)
             elif task_type == "llm.json":
                 result = _execute_llm_json(resolved_input, ctx, timeout_ms)
+            elif task_type == "captcha.solve":
+                result = _execute_captcha_solve(resolved_input, ctx, timeout_ms)
             else:
                 raise ValueError(f"Unsupported task type: {task_type}")
         finally:

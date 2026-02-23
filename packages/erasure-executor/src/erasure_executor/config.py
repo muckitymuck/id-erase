@@ -58,6 +58,13 @@ class BrowserConfig:
     headless: bool = True
     stealth: bool = True
     default_timeout_ms: int = 15000
+    min_delay_ms: int = 1000
+    max_delay_ms: int = 3000
+    proxy_url: str | None = None
+    proxy_username: str | None = None
+    proxy_password: str | None = None
+    check_robots_txt: bool = True
+    rate_limit_per_broker_per_hour: int = 30
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,15 @@ def load_config(path: Path | None = None) -> ExecutorConfig:
         headless=bool(browser_raw.get("headless", True)),
         stealth=bool(browser_raw.get("stealth", True)),
         default_timeout_ms=_coerce_int(browser_raw.get("default_timeout_ms"), "browser.default_timeout_ms", 15000),
+        min_delay_ms=_coerce_int(browser_raw.get("min_delay_ms"), "browser.min_delay_ms", 1000),
+        max_delay_ms=_coerce_int(browser_raw.get("max_delay_ms"), "browser.max_delay_ms", 3000),
+        proxy_url=_optional_str(browser_raw, "proxy_url"),
+        proxy_username=_optional_str(browser_raw, "proxy_username"),
+        proxy_password=_optional_str(browser_raw, "proxy_password"),
+        check_robots_txt=bool(browser_raw.get("check_robots_txt", True)),
+        rate_limit_per_broker_per_hour=_coerce_int(
+            browser_raw.get("rate_limit_per_broker_per_hour"), "browser.rate_limit_per_broker_per_hour", 30
+        ),
     )
 
     # Scheduler config

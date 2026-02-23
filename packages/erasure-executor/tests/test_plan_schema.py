@@ -44,7 +44,7 @@ def test_all_task_types_valid():
     valid_types = [
         "http.request", "scrape.static", "scrape.rendered", "form.submit",
         "email.send", "email.check", "email.click_verify", "match.identity",
-        "broker.update_status", "queue.human_action", "wait.delay", "llm.json",
+        "broker.update_status", "queue.human_action", "captcha.solve", "wait.delay", "llm.json",
     ]
     for tt in valid_types:
         task = PlanTask(id=f"t_{tt.replace('.', '_')}", name=f"Test {tt}", type=tt, input={})

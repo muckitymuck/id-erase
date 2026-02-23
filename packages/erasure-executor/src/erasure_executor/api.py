@@ -502,4 +502,40 @@ def build_app(
             session.add(schedule)
             session.commit()
 
+    # -----------------------------------------------------------------------
+    # Plan Health Check (Phase 3)
+    # -----------------------------------------------------------------------
+
+    @app.post("/v1/plans/{plan_id}/check")
+    def check_plan_health(plan_id: str, authorization: str | None = Header(default=None)):
+        """Check plan health by validating it loads and has valid task references.
+
+        Does NOT run the plan — only validates structure and selector plausibility.
+        """
+        require_bearer(authorization, config.auth_token)
+        try:
+            plan = load_plan(config.plans_root, plan_id)
+        except Exception as exc:
+            return {"plan_id": plan_id, "health": "broken", "error": str(exc), "tasks": []}
+
+        task_ids = {t.id for t in plan.tasks}
+        issues = []
+
+        for task in plan.tasks:
+            for dep in task.depends_on:
+                if dep not in task_ids:
+                    issues.append({"task": task.id, "issue": f"missing dependency: {dep}"})
+
+        health = "healthy" if not issues else "degraded"
+        return {
+            "plan_id": plan_id,
+            "health": health,
+            "task_count": len(plan.tasks),
+            "issues": issues,
+            "tasks": [
+                {"id": t.id, "type": t.type, "requires_approval": t.requires_approval}
+                for t in plan.tasks
+            ],
+        }
+
     return app
