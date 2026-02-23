@@ -1,0 +1,113 @@
+groups:
+  - name: id-erase
+    rules:
+      # ---------------------------------------------------------------
+      # Run health
+      # ---------------------------------------------------------------
+      - alert: HighRunFailureRate
+        expr: |
+          (
+            sum(rate(erasure_runs_finished_total{status="failed"}[15m]))
+            /
+            sum(rate(erasure_runs_finished_total[15m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 50% of runs failing over the last 15 minutes"
+          description: "Run failure rate is {{ $value | humanizePercentage }}. Check executor logs."
+
+      - alert: RunsStuck
+        expr: |
+          (sum(erasure_runs_started_total) - sum(erasure_runs_finished_total)) > 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10 runs appear stuck (started but not finished)"
+          description: "{{ $value }} runs have been started but not completed. Possible deadlock or resource exhaustion."
+
+      # ---------------------------------------------------------------
+      # Scan health
+      # ---------------------------------------------------------------
+      - alert: BrokerScanFailures
+        expr: |
+          sum by (broker) (rate(erasure_scans_total{result="failed"}[1h])) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Broker {{ $labels.broker }} has >3 scan failures in the last hour"
+          description: "Consecutive failures may trigger dead-letter disabling. Check plan and broker site changes."
+
+      - alert: NoScansRunning
+        expr: |
+          sum(rate(erasure_scans_total{result="started"}[6h])) == 0
+        for: 6h
+        labels:
+          severity: info
+        annotations:
+          summary: "No scans have started in the last 6 hours"
+          description: "The scheduler may be stopped or all schedules disabled."
+
+      # ---------------------------------------------------------------
+      # Human action queue
+      # ---------------------------------------------------------------
+      - alert: HumanQueueBacklog
+        expr: erasure_human_queue_pending > 5
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} human actions pending for over 1 hour"
+          description: "CAPTCHAs, phone verifications, or manual steps are accumulating. Check the queue."
+
+      - alert: ApprovalsBlocked
+        expr: erasure_approvals_pending > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} run approvals pending for over 2 hours"
+          description: "Runs are blocked waiting for operator approval."
+
+      # ---------------------------------------------------------------
+      # Task performance
+      # ---------------------------------------------------------------
+      - alert: SlowTaskExecution
+        expr: |
+          histogram_quantile(0.95, sum by (task_type, le) (rate(erasure_task_duration_seconds_bucket[15m]))) > 120
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task type {{ $labels.task_type }} p95 latency > 2 minutes"
+          description: "P95 task duration is {{ $value | humanizeDuration }}. Check for slow network, browser timeouts, or rate limiting."
+
+      # ---------------------------------------------------------------
+      # Removal progress
+      # ---------------------------------------------------------------
+      - alert: RemovalFailureSpike
+        expr: |
+          sum(rate(erasure_removals_total{result="failed"}[1h]))
+          >
+          2 * sum(rate(erasure_removals_total{result="succeeded"}[1h]))
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Removal failures exceeding 2x the success rate"
+          description: "Removal failure rate has spiked. Broker sites may have changed their opt-out flow."
+
+      # ---------------------------------------------------------------
+      # Executor health
+      # ---------------------------------------------------------------
+      - alert: ExecutorDown
+        expr: up{job="erasure-executor"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Erasure executor is down"
+          description: "The executor process is not responding to Prometheus scrapes."

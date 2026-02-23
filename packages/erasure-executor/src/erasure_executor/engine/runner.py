@@ -15,7 +15,7 @@ from erasure_executor.db.models import Run, RunApproval, RunTask
 from erasure_executor.engine.artifacts import persist_artifact
 from erasure_executor.engine.plans import hash_plan, load_plan
 from erasure_executor.engine.retries import RetryPolicy
-from erasure_executor.metrics import APPROVALS_PENDING, RUNS_FINISHED, TASK_DURATION
+from erasure_executor.metrics import APPROVALS_PENDING, RUNS_FINISHED, SCANS_TOTAL, TASK_DURATION
 from erasure_executor.tasks.registry import TaskExecutionContext, execute_task
 
 logger = logging.getLogger(__name__)
@@ -333,6 +333,7 @@ class Runner:
             session.add(run)
             session.commit()
             RUNS_FINISHED.labels(plan_id=run.plan_id, status="succeeded").inc()
+            SCANS_TOTAL.labels(broker=run.plan_id, result="completed").inc()
 
         except Exception as exc:
             run.status = "failed"
@@ -344,4 +345,5 @@ class Runner:
             session.add(run)
             session.commit()
             RUNS_FINISHED.labels(plan_id=run.plan_id, status="failed").inc()
+            SCANS_TOTAL.labels(broker=run.plan_id, result="failed").inc()
             logger.exception("run.failed run_id=%s", run.run_id)

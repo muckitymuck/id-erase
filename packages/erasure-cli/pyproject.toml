@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project]
+name = "erasure-cli"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "click>=8.1.0",
+  "httpx>=0.28.0",
+  "PyYAML>=6.0",
+  "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+id-erase = "erasure_cli.main:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

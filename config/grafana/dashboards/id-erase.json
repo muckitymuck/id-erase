@@ -1,0 +1,320 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Overview",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Active Runs",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(erasure_runs_started_total) - sum(erasure_runs_finished_total)",
+          "legendFormat": "Active"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 5},
+              {"color": "red", "value": 10}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Pending Human Actions",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "targets": [
+        {
+          "expr": "erasure_human_queue_pending",
+          "legendFormat": "Pending"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 3},
+              {"color": "red", "value": 10}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Pending Approvals",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "targets": [
+        {
+          "expr": "erasure_approvals_pending",
+          "legendFormat": "Pending"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Total Listings Found",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(erasure_listings_total{status=\"found\"})",
+          "legendFormat": "Found"
+        }
+      ]
+    },
+    {
+      "title": "Total Removals Submitted",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(erasure_removals_total{result=\"succeeded\"})",
+          "legendFormat": "Submitted"
+        }
+      ]
+    },
+    {
+      "title": "Verified Removed",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "targets": [
+        {
+          "expr": "sum(erasure_listings_total{status=\"verified_removed\"})",
+          "legendFormat": "Verified"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              {"color": "blue", "value": null}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Scans & Runs",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Runs Started vs Finished (5m rate)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "targets": [
+        {
+          "expr": "sum(rate(erasure_runs_started_total[5m]))",
+          "legendFormat": "Started"
+        },
+        {
+          "expr": "sum(rate(erasure_runs_finished_total{status=\"succeeded\"}[5m]))",
+          "legendFormat": "Succeeded"
+        },
+        {
+          "expr": "sum(rate(erasure_runs_finished_total{status=\"failed\"}[5m]))",
+          "legendFormat": "Failed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Failed"},
+            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
+          }
+        ]
+      }
+    },
+    {
+      "title": "Scans by Broker (5m rate)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "targets": [
+        {
+          "expr": "sum by (broker) (rate(erasure_scans_total{result=\"completed\"}[5m]))",
+          "legendFormat": "{{broker}} completed"
+        },
+        {
+          "expr": "sum by (broker) (rate(erasure_scans_total{result=\"failed\"}[5m]))",
+          "legendFormat": "{{broker}} failed"
+        }
+      ]
+    },
+    {
+      "title": "Task Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(erasure_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(erasure_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(erasure_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth"}
+        }
+      }
+    },
+    {
+      "title": "Task Duration by Type (p95)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (task_type, le) (rate(erasure_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{task_type}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "title": "Brokers & Listings",
+      "type": "row",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Listings by Broker & Status",
+      "type": "barchart",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "targets": [
+        {
+          "expr": "erasure_listings_total",
+          "legendFormat": "{{broker}} / {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"stacking": {"mode": "normal"}}
+        }
+      }
+    },
+    {
+      "title": "Match Confidence Distribution",
+      "type": "histogram",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "targets": [
+        {
+          "expr": "sum by (le) (erasure_match_confidence_bucket)",
+          "legendFormat": "{{le}}"
+        }
+      ]
+    },
+    {
+      "title": "Removals by Broker (cumulative)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 31},
+      "targets": [
+        {
+          "expr": "sum by (broker) (erasure_removals_total{result=\"succeeded\"})",
+          "legendFormat": "{{broker}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"drawStyle": "line", "fillOpacity": 20}
+        }
+      }
+    },
+    {
+      "title": "Removal Failure Rate (5m)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 31},
+      "targets": [
+        {
+          "expr": "sum(rate(erasure_removals_total{result=\"failed\"}[5m])) / (sum(rate(erasure_removals_total[5m])) > 0)",
+          "legendFormat": "Failure Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["id-erase", "privacy"],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"selected": true, "text": "Prometheus", "value": "prometheus"}
+      }
+    ]
+  },
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "id-erase Data Removal",
+  "uid": "id-erase-overview",
+  "version": 1
+}

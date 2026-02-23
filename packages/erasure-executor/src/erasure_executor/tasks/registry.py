@@ -528,6 +528,8 @@ def _execute_match_identity(task_input: dict[str, Any], ctx: TaskExecutionContex
     llm_threshold_low = float(task_input.get("llm_threshold_low", 0.4))
     llm_threshold_high = float(task_input.get("llm_threshold_high", 0.8))
 
+    from erasure_executor.metrics import MATCH_CONFIDENCE
+
     results: list[dict[str, Any]] = []
     matched: list[dict[str, Any]] = []
 
@@ -555,6 +557,7 @@ def _execute_match_identity(task_input: dict[str, Any], ctx: TaskExecutionContex
                 except Exception:
                     logger.exception("match.identity llm_verify failed, using heuristic score")
 
+        MATCH_CONFIDENCE.labels(broker=task_input.get("broker_id", "unknown")).observe(result_dict["confidence"])
         results.append(result_dict)
         if result_dict["above_threshold"]:
             matched.append(result_dict)
