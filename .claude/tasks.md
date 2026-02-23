@@ -4,9 +4,9 @@
 |-------|-------|
 | Version | 0.1.0 |
 | Date | 2026-02-23 |
-| Status | Phase 4 Complete |
-| Tests | 181 passing (unit: 165 executor + 16 CLI) |
-| Next | Phase 5: Legal & Discovery |
+| Status | Phase 5 Complete |
+| Tests | 231 passing (unit: 215 executor + 16 CLI) |
+| Next | Phase 6: Multi-User & Web UI |
 
 ### Progress Summary
 
@@ -17,7 +17,7 @@
 | 2. Broker Expansion | Done | 10 broker YAML plans, scheduler daemon, human action queue, catalog-backed API |
 | 3. Hardening | Done | Proxy/stealth, robots.txt, rate limiter, captcha.solve, artifact cleanup, dead letter tracker, plan health check |
 | 4. CLI & Observability | Done | Click CLI (16 tests), Grafana dashboard, Prometheus alerts, all metrics wired |
-| 5. Legal & Discovery | Future | CCPA/GDPR templates, search engine discovery |
+| 5. Legal & Discovery | Done | CCPA/GDPR templates, legal.generate_request, discover.search_engine, broker classifier (50 tests) |
 | 6. Multi-User & Web UI | Future | JWT auth, web dashboard, Kubernetes |
 
 ### Deferred / Integration Test Backlog
@@ -461,15 +461,59 @@ For each broker, the work is:
 
 ---
 
-## Phase 5: Legal & Discovery (Future)
+## Phase 5: Legal & Discovery (Week 13-14)
 
-- [ ] CCPA deletion request template
-- [ ] GDPR Article 17 request template
-- [ ] `legal.generate_request` task type (LLM-powered, template-based)
-- [ ] `discover.search_engine` task type (Google/Bing search for user's name)
-- [ ] LLM classifier: is this search result a data broker listing?
-- [ ] Auto-add discovered brokers to catalog (pending plan creation)
+### 5.1 CCPA/GDPR letter templates
+
+- [x] Create `legal/templates.py` with `string.Template`-based letter rendering:
+  - `CCPA_DELETION_TEMPLATE` — California Consumer Privacy Act § 1798.100 deletion request
+  - `GDPR_ERASURE_TEMPLATE` — Article 17 GDPR right to erasure request
+- [x] `render_letter()` function: fills template with profile PII (name, aliases, DOB, email, phone, addresses)
+- [x] `RenderedLetter` dataclass with subject, body, recipient metadata
+- [x] Handles edge cases: missing aliases, no DOB, no phone, missing broker address
+- [x] Tests: 25 tests covering CCPA rendering, GDPR rendering, edge cases, address formatting
+
+### 5.2 legal.generate_request task type
+
+- [x] Add `legal.generate_request` to TaskType Literal (now 15 types)
+- [x] Implement `_execute_legal_generate_request()` in registry.py:
+  - Resolves profile data from state refs
+  - Renders CCPA or GDPR letter via `legal/templates.py`
+  - Optional LLM customization: tailors letter for specific broker when `customize_with_llm=true`
+  - Falls back to standard template on LLM failure
+  - Returns: template_id, subject, body, recipient_name, customized flag
+
+### 5.3 discover.search_engine task type
+
+- [x] Add `discover.search_engine` to TaskType Literal (now 15 types)
+- [x] Create `discovery/search.py`:
+  - `build_search_queries()` — generates 4-5 query variations (name, name+location, name+public records, etc.)
+  - `build_search_url()` — Google and Bing search URL builders with pagination
+  - `extract_domain()` — registrable domain extraction from URLs
+  - `parse_search_results_from_html()` — extracts links from SERP HTML
+- [x] Implement `_execute_discover_search_engine()` in registry.py:
+  - Accepts pre-loaded results from `results_ref` (from scrape.rendered) or fetches via HTTP
+  - Rate-limited to 3 queries per invocation
+  - Classifies all results and returns broker domains
+
+### 5.4 Heuristic broker classifier
+
+- [x] `KNOWN_BROKER_DOMAINS` — 30+ known data broker domains
+- [x] `PROFILE_URL_PATTERNS` — 6 regex patterns for people-search profile URLs
+- [x] `PEOPLE_SEARCH_PATTERNS` — 10 regex patterns for people-search text signals
+- [x] `classify_result()` — scores each result with weighted signals:
+  - Known domain: +0.70
+  - URL pattern match: +0.15
+  - Text pattern hits: +0.10 each (cap 0.30)
+  - Threshold: confidence >= 0.30 = likely broker
+- [x] `discover_brokers()` — filters to likely brokers, sorts by confidence
+- [x] Tests: 25 tests covering query building, URL building, domain extraction, classification, discovery
+
+### 5.5 Deferred
+
+- [ ] Auto-add discovered brokers to catalog (requires plan generation)
 - [ ] Google content removal request integration
+- [ ] LLM-enhanced classification for borderline results
 
 ---
 

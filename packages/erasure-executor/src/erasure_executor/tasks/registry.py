@@ -867,6 +867,224 @@ def _execute_captcha_solve(task_input: dict[str, Any], ctx: TaskExecutionContext
 
 
 # ---------------------------------------------------------------------------
+# legal.generate_request
+# ---------------------------------------------------------------------------
+
+def _execute_legal_generate_request(task_input: dict[str, Any], ctx: TaskExecutionContext, timeout_ms: int) -> dict[str, Any]:
+    """Generate a CCPA or GDPR deletion request letter.
+
+    Input:
+        template_id: "ccpa_deletion" or "gdpr_erasure"
+        profile_ref: ref to decrypted profile data in state
+        broker_name: display name of the broker
+        broker_address: optional mailing/legal address
+        send_via_email: if true, also send the letter via email.send
+
+    Output:
+        template_id, subject, body, recipient_name
+    """
+    from erasure_executor.legal.templates import render_letter
+
+    template_id = task_input.get("template_id", "ccpa_deletion")
+    broker_name = task_input.get("broker_name", "Unknown Broker")
+    broker_address = task_input.get("broker_address", "")
+
+    # Resolve profile data
+    profile_ref = task_input.get("profile_ref")
+    profile_data = None
+    if profile_ref:
+        profile_data = _value_from_ref(profile_ref, ctx)
+    if not isinstance(profile_data, dict):
+        profile_data = _value_from_ref("profile_data", ctx)
+    if not isinstance(profile_data, dict):
+        raise ValueError("legal.generate_request: could not resolve profile data")
+
+    # If LLM is available, optionally customize the letter
+    customize = task_input.get("customize_with_llm", False)
+    if customize and ctx.config.llm.provider != "mock":
+        # Use LLM to tailor the letter for the specific broker
+        llm_input = {
+            "prompt": (
+                f"Customize this {template_id} data deletion request for {broker_name}. "
+                "Keep all legal references and structure intact. "
+                "Add specific details about what data this broker typically collects. "
+                "Return JSON with keys: subject, body."
+            ),
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["subject", "body"],
+            },
+            "json_ref": None,
+        }
+        # Render template first as baseline
+        letter = render_letter(template_id, profile_data, broker_name, broker_address)
+        ctx.state["_legal_baseline"] = {"subject": letter.subject, "body": letter.body}
+        llm_input["json_ref"] = "_legal_baseline"
+        try:
+            llm_result = _execute_llm_json(llm_input, ctx, timeout_ms)
+            output = llm_result.get("output", {})
+            if isinstance(output, dict) and output.get("body"):
+                return {
+                    "template_id": template_id,
+                    "subject": output.get("subject", letter.subject),
+                    "body": output["body"],
+                    "recipient_name": broker_name,
+                    "recipient_address": broker_address,
+                    "customized": True,
+                }
+        except Exception:
+            logger.exception("legal.generate_request LLM customization failed, using template")
+
+    # Standard template rendering
+    letter = render_letter(template_id, profile_data, broker_name, broker_address)
+
+    return {
+        "template_id": letter.template_id,
+        "subject": letter.subject,
+        "body": letter.body,
+        "recipient_name": letter.recipient_name,
+        "recipient_address": letter.recipient_address,
+        "customized": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# discover.search_engine
+# ---------------------------------------------------------------------------
+
+def _execute_discover_search_engine(task_input: dict[str, Any], ctx: TaskExecutionContext, timeout_ms: int) -> dict[str, Any]:
+    """Search for data broker listings via search engine scraping.
+
+    Input:
+        full_name: person's full name (required)
+        city: optional city for location-scoped search
+        state: optional state
+        engine: "google" or "bing" (default "google")
+        max_results: max results to return (default 50)
+        classify: if true, run broker classification on results (default true)
+
+    Output:
+        queries: list of search queries used
+        results: list of classified search results
+        brokers_found: list of unique broker domains discovered
+        new_brokers: domains not in known catalog
+    """
+    from erasure_executor.discovery.search import (
+        build_search_queries,
+        build_search_url,
+        classify_result,
+        extract_domain,
+        parse_search_results_from_html,
+        SearchResult,
+    )
+
+    full_name = task_input.get("full_name", "")
+    if not full_name:
+        raise ValueError("discover.search_engine requires full_name")
+
+    city = task_input.get("city", "")
+    state = task_input.get("state", "")
+    engine = task_input.get("engine", "google")
+    max_results = int(task_input.get("max_results", 50))
+    do_classify = task_input.get("classify", True)
+
+    queries = build_search_queries(full_name, city, state)
+
+    # If we have search results pre-loaded from a scrape.rendered step, use those
+    results_ref = task_input.get("results_ref")
+    all_results: list[SearchResult] = []
+
+    if results_ref:
+        raw = _value_from_ref(results_ref, ctx)
+        if isinstance(raw, dict) and "html" in raw:
+            all_results = parse_search_results_from_html(raw["html"])
+        elif isinstance(raw, list):
+            for i, item in enumerate(raw):
+                if isinstance(item, dict):
+                    all_results.append(SearchResult(
+                        url=item.get("url", ""),
+                        title=item.get("title", ""),
+                        snippet=item.get("snippet", ""),
+                        position=i + 1,
+                    ))
+    else:
+        # Fetch search results via HTTP
+        connector = HttpConnector(timeout_ms)
+        seen_urls: set[str] = set()
+
+        for query in queries[:3]:  # Limit to 3 queries
+            url = build_search_url(query, engine)
+            try:
+                res = connector.request("GET", url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml",
+                    "Accept-Language": "en-US,en;q=0.9",
+                })
+                if res.status_code < 400 and res.text:
+                    parsed = parse_search_results_from_html(res.text)
+                    for r in parsed:
+                        if r.url not in seen_urls:
+                            seen_urls.add(r.url)
+                            all_results.append(r)
+            except Exception:
+                logger.warning("discover.search_engine query=%s failed", query[:60])
+                continue
+
+            if len(all_results) >= max_results:
+                break
+
+    all_results = all_results[:max_results]
+
+    # Classify results
+    classified = []
+    brokers_found: set[str] = set()
+
+    if do_classify:
+        for r in all_results:
+            cr = classify_result(r)
+            if cr.is_likely_broker:
+                classified.append({
+                    "url": cr.url,
+                    "title": cr.title,
+                    "snippet": cr.snippet,
+                    "domain": cr.domain,
+                    "is_known_broker": cr.is_known_broker,
+                    "confidence": cr.confidence,
+                    "signals": cr.signals,
+                })
+                brokers_found.add(cr.domain)
+    else:
+        for r in all_results:
+            domain = extract_domain(r.url)
+            classified.append({
+                "url": r.url,
+                "title": r.title,
+                "snippet": r.snippet,
+                "domain": domain,
+                "is_known_broker": False,
+                "confidence": 0.0,
+                "signals": [],
+            })
+
+    # Determine which are new (not in known catalog)
+    from erasure_executor.discovery.search import KNOWN_BROKER_DOMAINS
+    new_brokers = sorted(brokers_found - KNOWN_BROKER_DOMAINS)
+
+    return {
+        "queries": queries,
+        "total_results": len(all_results),
+        "results": classified,
+        "brokers_found": sorted(brokers_found),
+        "new_brokers": new_brokers,
+        "engine": engine,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -909,6 +1127,10 @@ def execute_task(
                 result = _execute_llm_json(resolved_input, ctx, timeout_ms)
             elif task_type == "captcha.solve":
                 result = _execute_captcha_solve(resolved_input, ctx, timeout_ms)
+            elif task_type == "legal.generate_request":
+                result = _execute_legal_generate_request(resolved_input, ctx, timeout_ms)
+            elif task_type == "discover.search_engine":
+                result = _execute_discover_search_engine(resolved_input, ctx, timeout_ms)
             else:
                 raise ValueError(f"Unsupported task type: {task_type}")
         finally:

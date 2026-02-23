@@ -18,6 +18,8 @@ TaskType = Literal[
     "captcha.solve",
     "wait.delay",
     "llm.json",
+    "legal.generate_request",
+    "discover.search_engine",
 ]
 
 
